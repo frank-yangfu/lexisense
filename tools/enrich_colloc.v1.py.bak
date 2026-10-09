@@ -1,0 +1,184 @@
+# -*- coding: utf-8 -*-
+"""语料驱动生成常用搭配。
+
+方法：Brown / Reuters / MovieReviews / WebText 四语料（约 490 万词次）
+      1) unigram 频次 + 大小写统计 ->「真实词白名单」（剔除专名、语料标注残留、缩写）
+      2) 每个词库词统计左右邻接 bigram 与「动词 + 冠词 + 名词」trigram
+      3) PMI 排序 + WordNet 真实性校验，取前 3 条
+
+产出：%TEMP%/col_map.json   {word: [phrase, ...]}
+"""
+import io
+import json
+import math
+import os
+import re
+import sys
+from collections import Counter, defaultdict
+
+from nltk.corpus import wordnet as wn
+from nltk.corpus import brown, reuters, movie_reviews, webtext
+
+TMP = os.path.join(os.path.expanduser('~'), 'AppData', 'Local', 'Temp')
+TOKEN_RE = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
+
+STOP = set('''a an the i you he she it we they me him her us them my your his its our their
+this that these those am is are was were be been being do does did done have has had having
+will would shall should can could may might must and but or so if because as than then there
+here when where which who whom whose what how why not no nor too also very just only even still
+of to in on at by for with from into onto upon about after before during over under again
+s t re ve ll d m o n'''.split())
+
+ALLOW_TAIL = set('''on in off out up down over away back through along around about after for
+with to at into from against upon by of as between among beyond within without across under
+behind beside past toward towards onto forth ahead apart aside together forward
+account advantage care effect place part charge hold attention advantage progress sense
+measure advantage action steps place emphasis advantage'''.split())
+
+ALLOW_LEFT = set('''very quite rather extremely highly deeply strongly widely fully partly largely
+increasingly particularly especially often always never still already almost nearly hardly rarely
+usually sometimes more most less least well far much too so critically vitally absolutely
+totally completely utterly severely badly greatly closely firmly'''.split())
+
+BAD = set('''nn jj vb rb dt at np pp vbd vbn vbg nns vbz jjs rbr uh huh yeah okay ok oh ah er um
+sir madam ll ve re nt
+md inc ltd corp plc dept univ gov sen rep gen col capt prof rev hon jr sr vs etc ibid cit op
+vol pp ed est st ave rd blvd mr mrs ms dr no'''.split())
+
+
+def pos_of(gloss):
+    m = re.match(r'^(n|v|adj|adv|prep|conj|pron|num|art|aux|int|vt|vi)\.', str(gloss).strip())
+    return m.group(1) if m else None
+
+
+def main():
+    inv = json.load(io.open(os.path.join(TMP, 'inventory.json'), encoding='utf-8'))
+    vocab = set(it['w'] for it in inv)
+    is_verb = {}
+    for it in inv:
+        g = it['senses'][0]['g'] if it['senses'] else ''
+        is_verb[it['w']] = pos_of(g) in ('v', 'vt', 'vi')
+
+    print('语料加载中...')
+    seqs, uni, up, low = [], Counter(), Counter(), Counter()
+    for name, corp in (('brown', brown), ('reuters', reuters),
+                       ('movie_reviews', movie_reviews), ('webtext', webtext)):
+        toks = TOKEN_RE.findall(corp.raw())
+        lowers = [t.lower() for t in toks]
+        for t, l in zip(toks, lowers):
+            if t[0].isupper():
+                up[l] += 1
+            else:
+                low[l] += 1
+        uni.update(lowers)
+        seqs.append(lowers)
+        print('  %-14s %8d 词次' % (name, len(lowers)))
+
+    N = sum(uni.values())
+
+    # 真实词白名单：出现够多、非专名、非标注残留、非缩写
+    real = set()
+    for t, c in uni.items():
+        if c < 4 or len(t) < 2 or t in BAD or "'" in t:
+            continue
+        if low[t] < 3 or up[t] > low[t]:
+            continue
+        real.add(t)
+    print('总词次 %d | 词表 %d | 真实词白名单 %d' % (N, len(vocab), len(real)))
+
+    wn_cache = {}
+
+    def in_wn(t):
+        if t not in wn_cache:
+            try:
+                wn_cache[t] = bool(wn.synsets(t))
+            except Exception:
+                wn_cache[t] = False
+        return wn_cache[t]
+
+    right, left, art = defaultdict(Counter), defaultdict(Counter), defaultdict(Counter)
+    for toks in seqs:
+        n = len(toks)
+        for i, t in enumerate(toks):
+            if t not in vocab:
+                continue
+            if i and toks[i - 1] in real:
+                left[t][toks[i - 1]] += 1
+            if i + 1 < n and toks[i + 1] in real:
+                right[t][toks[i + 1]] += 1
+            if (is_verb.get(t) and i + 2 < n and toks[i + 1] in ('a', 'an', 'the')
+                    and toks[i + 2] in real):
+                art[t][toks[i + 1] + ' ' + toks[i + 2]] += 1
+
+    # 常用词门槛：500 万词次语料里至少出现 25 次，才允许作为搭配伙伴。
+    # 这一层专门滤掉「chubby rain」这类由生僻词凑出的高 PMI 假搭配。
+    FREQ_MIN = 25
+
+    def common(t):
+        return uni[t] >= FREQ_MIN
+
+    # 搭档词也是课标词（在词库里）时加分：学习者更需要「take place / heavy rain」
+    # 这种由已学词组成的搭配，而不是「take retaliatory」这类生僻搭档。
+    VOCAB_BONUS = 2.0
+
+    def pmi(c_ab, c_a, c_b):
+        if not c_ab or not c_a or not c_b:
+            return 0.0
+        return math.log((c_ab * N) / (c_a * c_b), 2)
+
+    out = {}
+    for w in vocab:
+        cands = []
+        for b, c in right[w].items():
+            if b in STOP and not (b in ALLOW_TAIL and is_verb.get(w)):
+                continue
+            if c < 5 or not common(b) or (b not in vocab and not in_wn(b)):
+                continue
+            s = pmi(c, uni[w], uni[b])
+            if s >= 5.0:
+                cands.append((s + math.log(c, 2) * 0.5 + (VOCAB_BONUS if b in vocab else 0), w + ' ' + b))
+        for a, c in left[w].items():
+            if a in STOP and a not in ALLOW_LEFT:
+                continue
+            if c < 5 or not common(a) or (a not in vocab and not in_wn(a)):
+                continue
+            s = pmi(c, uni[a], uni[w])
+            if s >= 5.0:
+                cands.append((s + math.log(c, 2) * 0.5 + (VOCAB_BONUS if a in vocab else 0), a + ' ' + w))
+        for ph, c in art[w].items():
+            if c < 5:
+                continue
+            det, noun = ph.split(' ')
+            if not common(noun) or (noun not in vocab and not in_wn(noun)):
+                continue
+            s = pmi(c, uni[w], uni[noun]) - 3.0
+            if s >= 4.0:
+                cands.append((s + math.log(c, 2) * 0.5 + (VOCAB_BONUS if noun in vocab else 0), w + ' ' + ph))
+        if not cands:
+            continue
+        cands.sort(key=lambda x: -x[0])
+        seen, picked = set(), []
+        for sc, ph in cands:
+            key = frozenset(ph.split())
+            if key in seen or ph in picked or ph == w:
+                continue
+            seen.add(key)
+            picked.append(ph)
+            if len(picked) >= 3:
+                break
+        if picked:
+            out[w] = picked
+
+    io.open(os.path.join(TMP, 'col_map.json'), 'w', encoding='utf-8').write(
+        json.dumps(out, ensure_ascii=False, separators=(',', ':')))
+    print('搭配覆盖 %d / %d 词 (%.1f%%) | 平均 %.1f 条'
+          % (len(out), len(vocab), 100.0 * len(out) / max(1, len(vocab)),
+             sum(len(v) for v in out.values()) / max(1, len(out))))
+    for w in ['depend', 'pay', 'take', 'make', 'important', 'heavy', 'rain', 'decision',
+              'solve', 'achieve', 'progress', 'attention', 'puppy', 'cushion']:
+        if w in out:
+            print('  ', w, '->', ', '.join(out[w]))
+
+
+if __name__ == '__main__':
+    main()

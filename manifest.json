@@ -1,0 +1,26 @@
+{
+  "name": "辞源 Lexisense",
+  "short_name": "辞源",
+  "description": "以「一切皆为意义」为核心理念的英语精确表意训练：词汇意义解码、语法意义地图、句子意义分析、真实语料挑战、写作意义批改。",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f6f9fc",
+  "theme_color": "#635bff",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "categories": ["education", "productivity"],
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    { "name": "今日学习", "url": "./index.html#today" },
+    { "name": "写作批改", "url": "./index.html#write" }
+  ]
+}

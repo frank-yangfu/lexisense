@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>辞源 Lexisense · 一切皆为意义</title>
+<meta name="description" content="辞源：以「一切皆为意义」为第一性原理的 AI 英语学习产品。覆盖小学到高中，词汇/语法/句子意义可视化，支持网页版、安卓 APK 与离线单文件。">
+<style>
+  :root{
+    --ink:#1c1830; --ink2:#5a5470; --line:#e7e3f4;
+    --brand:#6d5ae6; --brand-d:#3b2f63; --brand-l:#a99bf5;
+    --bg1:#f6f4ff; --bg2:#ffffff; --glass:rgba(255,255,255,.66);
+    --ok:#1aa179; --shadow:0 18px 50px rgba(59,47,99,.14);
+    --radius:20px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    font-family:"PingFang SC","Microsoft YaHei","Hiragino Sans GB",system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    color:var(--ink); background:
+      radial-gradient(1200px 600px at 12% -8%, #efeaff 0, transparent 55%),
+      radial-gradient(1000px 520px at 100% 0%, #f3eeff 0, transparent 50%),
+      linear-gradient(180deg,var(--bg1),var(--bg2) 60%);
+    line-height:1.7; -webkit-font-smoothing:antialiased;
+  }
+  a{color:inherit;text-decoration:none}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 22px}
+  .glass{background:var(--glass);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:1px solid rgba(255,255,255,.7);box-shadow:var(--shadow)}
+
+  /* nav */
+  nav{position:sticky;top:0;z-index:20;backdrop-filter:blur(14px);background:rgba(246,244,255,.78);border-bottom:1px solid var(--line)}
+  .nav-in{display:flex;align-items:center;justify-content:space-between;height:64px}
+  .brand{display:flex;align-items:center;gap:11px;font-weight:800;letter-spacing:.2px}
+  .logo{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;color:#fff;font-weight:900;
+    background:linear-gradient(135deg,var(--brand),var(--brand-d));box-shadow:0 8px 20px rgba(109,90,230,.4)}
+  .brand small{display:block;font-size:11px;color:var(--ink2);font-weight:600;letter-spacing:1.5px}
+  .nav-links{display:flex;gap:26px;font-size:14.5px;color:var(--ink2);font-weight:600}
+  .nav-links a:hover{color:var(--brand)}
+  .nav-cta{padding:9px 16px;border-radius:11px;background:var(--ink);color:#fff;font-weight:700;font-size:14px}
+
+  /* hero */
+  .hero{display:grid;grid-template-columns:1.25fr .9fr;gap:34px;align-items:center;padding:62px 0 40px}
+  .tag{display:inline-flex;align-items:center;gap:8px;padding:6px 13px;border-radius:999px;background:#fff;border:1px solid var(--line);font-size:13px;color:var(--brand-d);font-weight:700;margin-bottom:20px}
+  .tag .dot{width:7px;height:7px;border-radius:50%;background:var(--brand)}
+  h1{font-size:46px;line-height:1.12;letter-spacing:-.5px;font-weight:850}
+  h1 .grad{background:linear-gradient(120deg,var(--brand),var(--brand-d));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .lede{margin:18px 0 26px;font-size:17px;color:var(--ink2);max-width:520px}
+  .btns{display:flex;gap:14px;flex-wrap:wrap}
+  .btn{padding:14px 22px;border-radius:14px;font-weight:800;font-size:15.5px;display:inline-flex;align-items:center;gap:10px;transition:.18s;cursor:pointer}
+  .btn.primary{background:linear-gradient(135deg,var(--brand),var(--brand-d));color:#fff;box-shadow:0 12px 28px rgba(109,90,230,.42)}
+  .btn.primary:hover{transform:translateY(-2px);box-shadow:0 16px 34px rgba(109,90,230,.5)}
+  .btn.ghost{background:#fff;color:var(--ink);border:1px solid var(--line)}
+  .btn.ghost:hover{border-color:var(--brand-l);color:var(--brand)}
+  .hero-meta{margin-top:22px;font-size:13.5px;color:var(--ink2);display:flex;gap:18px;flex-wrap:wrap}
+  .hero-meta b{color:var(--ink)}
+
+  /* qr card */
+  .qr{justify-self:center}
+  .qr .card{padding:22px;border-radius:var(--radius);text-align:center;width:268px}
+  .qr img{width:188px;height:188px;border-radius:12px;background:#fff;padding:8px}
+  .qr h4{margin-top:12px;font-size:15px}
+  .qr p{font-size:12.5px;color:var(--ink2);margin-top:4px}
+
+  /* sections */
+  section{padding:54px 0}
+  .sec-head{text-align:center;margin-bottom:34px}
+  .sec-head .kicker{color:var(--brand);font-weight:800;font-size:13px;letter-spacing:2px}
+  .sec-head h2{font-size:30px;font-weight:850;margin-top:8px;letter-spacing:-.3px}
+  .sec-head p{color:var(--ink2);margin-top:10px;font-size:15.5px;max-width:620px;margin-left:auto;margin-right:auto}
+
+  .principle{padding:34px;border-radius:var(--radius);text-align:center}
+  .principle .big{font-size:22px;font-weight:800;color:var(--brand-d);margin-bottom:8px}
+  .principle p{color:var(--ink2);font-size:15.5px;max-width:760px;margin:0 auto}
+
+  .grid{display:grid;gap:18px}
+  .grid.c3{grid-template-columns:repeat(3,1fr)}
+  .grid.c2{grid-template-columns:repeat(2,1fr)}
+  .card{padding:24px;border-radius:var(--radius);transition:.18s}
+  .card:hover{transform:translateY(-3px)}
+  .ic{width:46px;height:46px;border-radius:13px;display:grid;place-items:center;background:linear-gradient(135deg,#efeaff,#e7e0ff);margin-bottom:14px}
+  .ic svg{width:24px;height:24px;stroke:var(--brand-d);fill:none;stroke-width:1.8}
+  .card h3{font-size:17.5px;font-weight:800;margin-bottom:6px}
+  .card p{font-size:14px;color:var(--ink2)}
+
+  /* curriculum */
+  .curri{padding:30px;border-radius:var(--radius);display:grid;grid-template-columns:1fr 1fr;gap:26px;align-items:center}
+  .curri .stats{display:flex;gap:14px;margin-top:18px;flex-wrap:wrap}
+  .stat{flex:1;min-width:120px;padding:16px;border-radius:14px;background:#fff;border:1px solid var(--line)}
+  .stat b{display:block;font-size:26px;font-weight:850;color:var(--brand-d)}
+  .stat span{font-size:13px;color:var(--ink2)}
+  .bars{display:flex;flex-direction:column;gap:13px}
+  .bar-row{display:grid;grid-template-columns:96px 1fr 52px;gap:12px;align-items:center;font-size:14px}
+  .bar-row .track{height:10px;border-radius:999px;background:#ece8fb;overflow:hidden}
+  .bar-row .fill{height:100%;border-radius:999px;background:linear-gradient(90deg,var(--brand-l),var(--brand))}
+  .bar-row b{text-align:right;color:var(--brand-d);font-weight:800}
+
+  /* platforms */
+  .plat{padding:26px;border-radius:var(--radius);display:flex;gap:16px;align-items:flex-start}
+  .plat .pin{width:42px;height:42px;border-radius:12px;display:grid;place-items:center;background:#fff;border:1px solid var(--line);flex:none}
+  .plat h3{font-size:16.5px;font-weight:800}
+  .plat p{font-size:13.5px;color:var(--ink2);margin-top:3px}
+  .plat .pill{display:inline-block;margin-top:9px;font-size:12px;font-weight:700;color:var(--ok);background:#e7f7f0;padding:3px 10px;border-radius:999px}
+
+  /* download */
+  .dl{padding:36px;border-radius:var(--radius);text-align:center}
+  .dl h2{font-size:27px;font-weight:850}
+  .dl p{color:var(--ink2);margin:10px 0 24px}
+  .dl-btns{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+  .fileinfo{margin-top:22px;font-size:13px;color:var(--ink2);display:flex;gap:26px;justify-content:center;flex-wrap:wrap}
+  .fileinfo b{color:var(--ink)}
+
+  /* changelog / privacy */
+  .notes{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  .note{padding:26px;border-radius:var(--radius)}
+  .note h3{font-size:17px;font-weight:800;margin-bottom:12px;display:flex;align-items:center;gap:9px}
+  .note h3 .n{width:26px;height:26px;border-radius:8px;background:var(--brand);color:#fff;display:grid;place-items:center;font-size:13px}
+  .note ul{list-style:none;font-size:14px;color:var(--ink2)}
+  .note li{padding:6px 0 6px 20px;position:relative}
+  .note li::before{content:"";position:absolute;left:0;top:14px;width:7px;height:7px;border-radius:50%;background:var(--brand-l)}
+  .note.warn{background:#fff8ec;border:1px solid #f3e2bf}
+  .note.warn li::before{background:#e0a93b}
+  .note.warn h3 .n{background:#e0a93b}
+
+  footer{padding:34px 0 50px;text-align:center;color:var(--ink2);font-size:13px;border-top:1px solid var(--line);margin-top:30px}
+  footer a{color:var(--brand);font-weight:700}
+
+  @media(max-width:860px){
+    .hero{grid-template-columns:1fr;padding:40px 0 20px}
+    h1{font-size:36px}
+    .grid.c3,.grid.c2,.curri,.notes{grid-template-columns:1fr}
+    .nav-links{display:none}
+    .qr{order:-1}
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap nav-in">
+    <div class="brand">
+      <div class="logo">辞</div>
+      <div>辞源<small>LEXISENSE</small></div>
+    </div>
+    <div class="nav-links">
+      <a href="#idea">理念</a>
+      <a href="#modules">功能</a>
+      <a href="#course">课程</a>
+      <a href="#platform">多端</a>
+      <a href="#download">下载</a>
+    </div>
+    <a class="nav-cta" href="#download">免费下载</a>
+  </div>
+</nav>
+
+<header class="wrap hero">
+  <div>
+    <span class="tag"><span class="dot"></span>第一性原理 · 一切皆为意义</span>
+    <h1>让每个英语表达<br>都有<span class="grad">清晰的意义</span></h1>
+    <p class="lede">辞源以「精确表意」为唯一标准，从词汇、句法到语用三层训练你的英语。覆盖小学到高中，语境沉浸式学习，本地存储进度，零广告零订阅。</p>
+    <div class="btns">
+      <a class="btn primary" href="lexisense-1.4.apk">⬇ 下载安卓 APP（3.3 MB）</a>
+      <a class="btn ghost" href="lexisense-offline.html">↗ 打开网页离线版</a>
+    </div>
+    <div class="hero-meta">
+      <span>📱 <b>安卓 / 鸿蒙 4.x</b> 可装</span>
+      <span>🌐 <b>网页 / 离线</b> 即用</span>
+      <span>📚 <b>小初高 3228 词</b></span>
+      <span>🔒 <b>本地存储</b> 不联网</span>
+    </div>
+  </div>
+  <div class="qr">
+    <div class="card glass">
+      <img src="qrcode.png" alt="扫码直达发布页">
+      <h4>扫码直达</h4>
+      <p>手机扫一扫，打开发布页下载</p>
+    </div>
+  </div>
+</header>
+
+<section id="idea">
+  <div class="wrap">
+    <div class="principle glass">
+      <div class="big">「一切皆为意义」</div>
+      <p>英语的本质是精确表意的工具——每一个词、每一个句法结构都必须承载清晰、确定且不可替代的意义。辞源不教你"大概意思"，而是训练你写出、说出没有歧义、没有冗余、意义明确的英语。</p>
+    </div>
+  </div>
+</section>
+
+<section id="modules">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kicker">LEARNING LOOP</div>
+      <h2>完整学习闭环</h2>
+      <p>感知 — 理解 — 练习 — 输出 — 反馈，五大模块形成可循环的能力提升路径。</p>
+    </div>
+    <div class="grid c3">
+      <div class="card glass">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/></svg></div>
+        <h3>词汇意义解码</h3>
+        <p>在完整句子中呈现生词，近义词最小对比对、一词多义场景化、词根意义网络，告别孤立背单词。</p>
+      </div>
+      <div class="card glass">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M4 18V8m5 10V5m5 13v-7m5 7V9"/></svg></div>
+        <h3>语法意义可视化</h3>
+        <p>每个语法点标注"含义贡献度"，意义地图对比时态语态，错误不仅纠形式更解释意义扭曲。</p>
+      </div>
+      <div class="card glass">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16M9 6v12"/></svg></div>
+        <h3>句子意义分析</h3>
+        <p>自动标注成分语义角色，检测指代不明、修饰悬垂、结构歧义，提供改写与意义对比。</p>
+      </div>
+      <div class="card glass">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0Zm9-5v5l3 2"/></svg></div>
+        <h3>真实语料解析</h3>
+        <p>"意义挑战"解读每个词的不可替代性，"模糊句修复"改写为多个明确版本并对比差异。</p>
+      </div>
+      <div class="card glass">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg></div>
+        <h3>输出检验闭环</h3>
+        <p>写作逐句检测意义明确性，口语意义清晰度评分，量化指标可视化成长轨迹。</p>
+      </div>
+      <div class="card glass">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M12 3l2.5 5 5.5.8-4 4 1 5.5L12 21l-5-2.7 1-5.5-4-4 5.5-.8z"/></svg></div>
+        <h3>记忆盒复习</h3>
+        <p>基于遗忘曲线的间隔复习，错题自动回流，多学生账号本地隔离，进度永不混淆。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="course">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kicker">CURRICULUM</div>
+      <h2>覆盖小学到高中</h2>
+      <p>10 个年级、<b>3228</b> 个词条与技能点，全部配备英文释义、常用搭配与词根关联，循序渐进，每日任务按掌握度自适应推进。</p>
+    </div>
+    <div class="curri glass">
+      <div>
+        <h3 style="font-size:19px;font-weight:850">分层课程体系</h3>
+        <p style="color:var(--ink2);font-size:14.5px;margin-top:6px">从小学基础词到高中复杂语义网络，难度平滑上升，每个词都在真实语境中习得。</p>
+        <div class="stats">
+          <div class="stat"><b>10</b><span>覆盖年级</span></div>
+          <div class="stat"><b>3228</b><span>词条 / 技能</span></div>
+          <div class="stat"><b>3</b><span>学段（小/初/高）</span></div>
+        </div>
+      </div>
+      <div class="bars">
+        <div class="bar-row"><span>小学 3–6</span><div class="track"><div class="fill" style="width:36%"></div></div><b>519</b></div>
+        <div class="bar-row"><span>初中 7–9</span><div class="track"><div class="fill" style="width:100%"></div></div><b>1463</b></div>
+        <div class="bar-row"><span>高中 10–12</span><div class="track"><div class="fill" style="width:83%"></div></div><b>1207</b></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="platform">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kicker">ANYWHERE</div>
+      <h2>多端随心学</h2>
+      <p>同一套课程与进度逻辑，三种形态任意切换，全部本地运行，隐私不出本机。</p>
+    </div>
+    <div class="grid c3">
+      <div class="plat glass">
+        <div class="pin"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="#6d5ae6" stroke-width="1.8"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div>
+        <div><h3>网页版</h3><p>任意浏览器打开即用，支持 PWA 安装到桌面。</p><span class="pill">✓ 即开即用</span></div>
+      </div>
+      <div class="plat glass">
+        <div class="pin"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="#6d5ae6" stroke-width="1.8"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M11 18h2"/></svg></div>
+        <div><h3>安卓 APP</h3><p>APK 直装，安卓 5.1+ 与鸿蒙 4.x 可用，原生体验。</p><span class="pill">✓ 3.3 MB</span></div>
+      </div>
+      <div class="plat glass">
+        <div class="pin"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="#6d5ae6" stroke-width="1.8"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg></div>
+        <div><h3>离线单文件</h3><p>一个 HTML 发微信即可打开，零网络依赖，随时能用。</p><span class="pill">✓ 零依赖</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="download">
+  <div class="wrap">
+    <div class="dl glass">
+      <h2>立即免费下载</h2>
+      <p>无广告、无订阅、无账号强制。学习数据保存在你自己的设备上。</p>
+      <div class="dl-btns">
+        <a class="btn primary" href="lexisense-1.4.apk">⬇ 安卓 APP（APK）</a>
+        <a class="btn ghost" href="lexisense-offline.html">↗ 网页离线版（HTML）</a>
+      </div>
+      <div class="fileinfo">
+        <span>📦 <b>lexisense-1.4.apk</b> · 3.30 MB</span>
+        <span>🌐 <b>lexisense-offline.html</b> · 1.14 MB</span>
+        <span>🔏 自签名 · 包名 <b>com.lexisense.app</b></span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="notes">
+      <div class="note glass">
+        <h3><span class="n">v</span>更新日志 v1.4</h3>
+        <ul>
+          <li><b>词根关联 748 → 1004 词</b>（覆盖率 23.2% → <b>31.1%</b>）：新增 256 条构词说明，逐条人工复核后才收录</li>
+          <li><b>修复系统性漏标</b>：原先硬性要求「词干必须是学习词库里的词」，导致 <code>beautiful</code>（beauty + -ful）、<code>usually</code>（usual + -ly）、<code>sweater</code>（sweat + -er）等 138 个派生词完全拿不到构词说明。改为「词干须经 WordNet 派生关系验证」—— 既放开词库外的真词词干，又用词典标注过的形态家族关系挡掉 <code>brother ← broth</code>、<code>hamburger ← hamburg</code> 这类纯字符串巧合</li>
+          <li><b>同化前缀补齐</b>：新增 ad- 的 7 个同化形式（ac- / af- / ag- / ap- / ar- / as- / at-）与 ab- / para- / circum- / hypo- / meta- / syn- 等 → 补上 <code>accompany</code>（ac- + company）、<code>adverb</code>、<code>parameter</code>、<code>hypothesis</code>、<code>synthesis</code> 等 15 词</li>
+          <li><b>-ly 副词支线打通</b>：<code>additional</code> / <code>usual</code> / <code>complete</code> 这类形容词没进词库、WordNet 又未记录 -ly 派生关系，使得 <code>actually</code> / <code>finally</code> / <code>usually</code> / <code>completely</code> / <code>normally</code> 等 34 个超高频副词一个都无标注 —— 新增「基础词须为 WordNet 形容词」判定</li>
+          <li><b>复合词人工白名单</b>：<code>backpack</code> / <code>classmate</code> / <code>firefighter</code> / <code>fingerprint</code> / <code>newspaper</code> 等 72 个复合词，两半都是地道英语自由词、但其中一半没进学习词库。曾尝试把判据放宽成 WordNet 全量词表，实测产出 <code>literacy = lite + racy</code>、<code>carpenter = carp + enter</code>、<code>generate = gene + rate</code> 这类荒唐拆解（精确度跌到七成），故改为逐条人工核对的白名单</li>
+          <li><b>新增 6 个词根</b>：<code>toler</code>（忍受）/ <code>liter</code>（字母）/ <code>moder</code>（尺度）/ <code>stabil</code>（站稳）/ <code>dem</code>（人民）/ <code>centr</code>（中心）→ 修正 <code>tolerant</code>、<code>literacy</code>、<code>moderate</code>、<code>stability</code>、<code>epidemic</code></li>
+          <li><b>词根网络 22 组 → 30 组</b>（175 词）：新增 <code>cept</code>（accept / except / concept）、<code>sist</code>（consistent / assist / insist）、<code>lect</code>（lecture / dialect / dialectic）、<code>soci</code>（sociable / social / association）等系列</li>
+          <li><b>纠错 15 条原有标注</b>：<code>syntactic</code> 不再误挂拉丁 <code>tact</code>（实为希腊 tassein「排列」）；<code>courageous</code> 由 <code>-eous</code> 改 <code>-ous</code>；<code>concentration</code> / <code>stability</code> / <code>tolerance</code> 改走词根拆解</li>
+          <li><b>拼读自校正</b>：后缀写法一律取「能把整词拼回来」的那个 —— <code>honest + -y</code>（不再写 -ty）、<code>assert + -ion</code>（不再写 -tion）、<code>browse + -er</code>（不再写 -r）</li>
+          <li><b>词库 3228 词</b>：小学 519 · 初中 1463 · 高中 1207；<b>英文释义 100%</b>（3335 个义项）；<b>常用搭配 894 词</b>（5 语料约 609 万词次统计）</li>
+          <li>词汇 / 语法 / 句子意义三大解码模块；小学到高中 10 年级分层课程体系；记忆盒间隔复习 + 错题回流</li>
+          <li>多学生本地账号进度隔离；安卓 APK 直装 + 离线单文件 HTML；学习报告导出（JSON）</li>
+        </ul>
+      </div>
+      <div class="note warn glass">
+        <h3><span class="n">!</span>上架前须知</h3>
+        <ul>
+          <li>应用商店上架需营业执照 + 软著 + 隐私政策</li>
+          <li>本页二维码默认指向占位地址，部署后请替换为真实链接</li>
+          <li>进度存于本机，换设备需手动导出/导入</li>
+          <li>纯血鸿蒙 NEXT（5.0+）暂不支持 APK</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    辞源 Lexisense · 一切皆为意义 · 精确表意<br>
+    本产品为个人学习工具，数据全部本地存储。<a href="#download">回到下载</a><br>
+    <span style="opacity:.7;font-size:12.5px">版本 v1.4 · 构建于 2026-09-16 · 课程 3228 词 / 10 年级</span>
+  </div>
+</footer>
+
+</body>
+</html>

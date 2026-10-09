@@ -1,0 +1,1314 @@
+/* ============================================================
+   辞源 Lexisense — 应用逻辑
+   学习引擎 / 出题 / 判分 / SRS 错题本 / 写作批改 / 能力雷达
+   ============================================================ */
+(function () {
+  'use strict';
+
+  /* 课程体系构建：把小/初/高词库与分学段技能语料并入主库 */
+  if (window.DBX && typeof DBX.build === 'function') {
+    try { DBX.build(); } catch (e) { if (window.console) console.error('课程体系构建失败', e); }
+  }
+
+  /* 多学生档案（本地登录）：每个名字一份独立进度，互不干扰 */
+  var LEGACY_KEY = 'me_state_v1';      // 旧版单档案数据（首次使用时自动迁移）
+  var USER_KEY = 'me_users_v1';        // 学生名单索引
+  function stateKey(id) { return 'me_s1.' + id; }        // 每个学生的完整进度
+  function metaKey(id) { return 'me_m1.' + id; }         // 每个学生的轻量元数据（登录页秒开）
+  function validName(n) {
+    n = String(n == null ? '' : n).trim();
+    if (n.length < 1 || n.length > 14) return '';
+    if (!/^[\u4e00-\u9fa5A-Za-z0-9 _·.\-]+$/.test(n)) return '';
+    return n;
+  }
+  var $ = function (s, r) { return (r || document).querySelector(s); };
+  var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
+  var esc = function (s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  };
+  var clamp = function (v, a, b) { return Math.max(a, Math.min(b, v)); };
+  var today = function () { var d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
+  var pad = function (n) { return n < 10 ? '0' + n : '' + n; };
+  var DAY = 86400000;
+
+  /* ---------------- 状态 ---------------- */
+  var DEF = {
+    day: '', start: '', streak: 0, lastDay: '', grade: 'g3', scope: 'grade',
+    done: { vocab: 0, syn: 0, poly: 0, gram: 0, sent: 0, amb: 0, corpus: 0, write: 0 },
+    right: { vocab: 0, syn: 0, poly: 0, gram: 0, corpus: 0 },
+    words: {},
+    seen: { syn: [], poly: [], gram: [], sent: [], amb: [], corpus: [], chal: [] },
+    wrong: [],
+    history: [],
+    mastery: { vocab: 0, gram: 0, sent: 0, amb: 0, out: 0 }
+  };
+  /* 学生档案索引：{ list:[{id,name,ts}], cur:当前学生id } */
+  var USERS = loadUsers();
+  function loadUsers() {
+    var d = { list: [], cur: null };
+    try {
+      var raw = localStorage.getItem(USER_KEY);
+      if (raw) {
+        var o = JSON.parse(raw);
+        if (o && Array.isArray(o.list)) d.list = o.list.filter(function (u) { return u && u.id && typeof u.name === 'string'; });
+        if (o && o.cur && d.list.some(function (u) { return u.id === o.cur; })) d.cur = o.cur;
+      }
+    } catch (e) { }
+    /* 首次使用：若存在旧版单档案数据，自动迁移为「学习者」档案，老进度不丢失 */
+    if (!d.list.length) {
+      try {
+        var old = localStorage.getItem(LEGACY_KEY);
+        if (old) {
+          d.list.push({ id: 'learner', name: '学习者', ts: Date.now() });
+          d.cur = 'learner';
+          localStorage.setItem(stateKey('learner'), old);
+          localStorage.removeItem(LEGACY_KEY);
+          localStorage.setItem(USER_KEY, JSON.stringify(d));  // 立即持久化索引，避免重复迁移
+        }
+      } catch (e2) { }
+    }
+    return d;
+  }
+  function saveUsers() { try { localStorage.setItem(USER_KEY, JSON.stringify(USERS)); } catch (e) { } }
+  function nameOf(id) {
+    for (var i = 0; i < USERS.list.length; i++) if (USERS.list[i].id === id) return USERS.list[i].name;
+    return '';
+  }
+  function curUser() {
+    for (var i = 0; i < USERS.list.length; i++) if (USERS.list[i].id === USERS.cur) return USERS.list[i];
+    return null;
+  }
+  function freshState() { return JSON.parse(JSON.stringify(DEF)); }
+  function loadState(id) {
+    var st = freshState();
+    try {
+      var raw = localStorage.getItem(stateKey(id));
+      if (!raw) { st.name = nameOf(id); return st; }
+      var o = JSON.parse(raw);
+      st = Object.assign(freshState(), o);
+      if (!st.seen.chal) st.seen.chal = [];   // 旧版本数据兼容
+      if (!st.start) st.start = st.day || '';
+      st.name = nameOf(id);
+      return st;
+    } catch (e) { st.name = nameOf(id); return st; }
+  }
+  function save() {
+    try {
+      if (!USERS.cur) return;
+      S.name = nameOf(USERS.cur) || S.name;
+      localStorage.setItem(stateKey(USERS.cur), JSON.stringify(S));
+      var u = curUser();
+      localStorage.setItem(metaKey(USERS.cur), JSON.stringify({
+        name: u ? u.name : '', day: S.day, last: S.lastDay, n: Object.keys(S.words).length, streak: S.streak
+      }));
+    } catch (e) { }
+  }
+  var S = (function () {
+    if (USERS.cur) return loadState(USERS.cur);
+    var st = freshState(); st.name = '';
+    return st;
+  })();
+  /* 自然日差：用本地日历构造，避免 ISO 字符串按 UTC 解析与时区/DST 带来的毫秒误差 */
+  function dayDiff(from, to) {
+    if (!from || !to) return NaN;
+    var a = String(from).split('-'), b = String(to).split('-');
+    if (a.length !== 3 || b.length !== 3) return NaN;
+    var ta = new Date(+a[0], +a[1] - 1, +a[2]).getTime();
+    var tb = new Date(+b[0], +b[1] - 1, +b[2]).getTime();
+    if (!isFinite(ta) || !isFinite(tb)) return NaN;
+    return Math.round((tb - ta) / DAY);
+  }
+  /* 连续学习天数：幂等推进
+     d=1 → 昨天也来过，累加；d>1 → 中断，从今天重新计；首次/异常 → 至少记 1
+     同一天重复调用直接返回 false，不会重复 +1 */
+  function rollDay() {
+    var t = today();
+    if (S.day === t) return false;
+    var d = dayDiff(S.lastDay || S.day, t);
+    if (d === 1) S.streak = (S.streak || 0) + 1;
+    else if (d > 1) S.streak = 1;
+    else S.streak = Math.max(1, S.streak || 0);
+    S.day = t; S.lastDay = t;
+    S.done = { vocab: 0, syn: 0, poly: 0, gram: 0, sent: 0, amb: 0, corpus: 0, write: 0 };
+    save();
+    return true;
+  }
+  rollDay();
+
+  /* 跨天校准：APK 常驻后台/页面不重新加载时，日期也要能推进 */
+  function tickDay(silent) {
+    if (!rollDay()) return;
+    if (typeof render === 'function' && TITLES && TITLES[cur]) render(cur);
+    if (!silent && cur === 'today') toast('新的一天：连续学习 ' + S.streak + ' 天');
+  }
+  if (window.addEventListener) {
+    window.addEventListener('focus', function () { tickDay(false); });
+    window.addEventListener('pageshow', function () { tickDay(true); });
+  }
+  if (document.addEventListener) {
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) tickDay(false); });
+  }
+  try { setInterval(function () { tickDay(true); }, 60000); } catch (e) { }
+
+  /* ---------------- SRS ---------------- */
+  var BOX_DAYS = [0, 1, 2, 4, 8, 16];
+  function wrec(w) {
+    if (!S.words[w]) S.words[w] = { box: 0, next: 0, seen: 0, right: 0 };
+    return S.words[w];
+  }
+  function srsUp(w) { var r = wrec(w); r.box = Math.min(5, r.box + 1); r.seen++; r.right++; r.last = today(); r.next = Date.now() + BOX_DAYS[r.box] * DAY; save(); }
+  function srsDown(w) { var r = wrec(w); r.box = 0; r.seen++; r.last = today(); r.next = Date.now(); save(); }
+
+  /* ---------------- 工具 ---------------- */
+  function shuffle(a) { a = a.slice(); for (var i = a.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = a[i]; a[i] = a[j]; a[j] = t; } return a; }
+  function pick(arr, n) { return shuffle(arr).slice(0, n); }
+  /* 年级范围切换条 */
+  function scopeBar(txt) {
+    return '<span class="muted">' + esc(txt) + '</span>' +
+      '<span class="chip' + (S.scope === 'grade' ? ' on' : '') + '" data-act="scope" data-k="grade" style="margin-left:8px">本年级</span>' +
+      '<span class="chip' + (S.scope === 'all' ? ' on' : '') + '" data-act="scope" data-k="all">全部</span>';
+  }
+  function toast(msg) {
+    var t = $('#toast'); t.textContent = msg; t.classList.add('on');
+    clearTimeout(t._t); t._t = setTimeout(function () { t.classList.remove('on'); }, 1900);
+  }
+  function countWords(s) { var m = String(s).match(/[A-Za-z0-9'’-]+/g); return m ? m.length : 0; }
+
+  function addWrong(item) {
+    if (S.wrong.filter(function (x) { return x.key === item.key; }).length) return;
+    S.wrong.unshift(Object.assign({ time: Date.now() }, item));
+    if (S.wrong.length > 200) S.wrong.pop();
+    save(); badge();
+  }
+  function badge() {
+    var b = $('#wbBadge'); if (!b) return;
+    b.textContent = S.wrong.length; b.classList.toggle('hide', !S.wrong.length);
+  }
+  function bump(k, correct) {
+    rollDay();                     // 每做一次练习都校准日期，跨零点学习不会漏记
+    S.done[k] = (S.done[k] || 0) + 1;
+    if (correct && S.right[k] !== undefined) S.right[k]++;
+    // 能力值缓慢增长
+    var cap = { vocab: 'vocab', syn: 'vocab', poly: 'vocab', gram: 'gram', sent: 'sent', amb: 'amb', corpus: 'amb', write: 'out' };
+    var m = cap[k]; if (m) {
+      S.mastery[m] = clamp(S.mastery[m] + (correct ? 2.2 : 0.7), 0, 100);
+      if (!correct) S.mastery[m] = clamp(S.mastery[m] - 1.2, 0, 100);
+    }
+    save();
+  }
+
+  /* ---------------- 雷达图 ---------------- */
+  function radar(vals, labels, size) {
+    size = size || 300;
+    var n = vals.length, cx = size / 2, cy = size / 2 + 4, R = size / 2 - 52;
+    var pt = function (i, r) {
+      var a = -Math.PI / 2 + i * 2 * Math.PI / n;
+      return [cx + Math.cos(a) * r, cy + Math.sin(a) * r];
+    };
+    var s = '<svg width="' + size + '" height="' + size + '" viewBox="0 0 ' + size + ' ' + size + '">';
+    for (var g = 5; g >= 1; g--) {
+      var r = R * g / 5, d = '';
+      for (var i = 0; i < n; i++) { var p = pt(i, r); d += (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1); }
+      s += '<path d="' + d + 'Z" fill="' + (g === 5 ? 'rgba(99,91,255,.045)' : 'none') + '" stroke="rgba(10,37,64,.10)" stroke-width="1"/>';
+    }
+    for (var i2 = 0; i2 < n; i2++) { var p2 = pt(i2, R); s += '<line x1="' + cx + '" y1="' + cy + '" x2="' + p2[0].toFixed(1) + '" y2="' + p2[1].toFixed(1) + '" stroke="rgba(10,37,64,.10)"/>'; }
+    var dd = '';
+    for (var i3 = 0; i3 < n; i3++) { var p3 = pt(i3, R * clamp(vals[i3], 0, 100) / 100); dd += (i3 ? 'L' : 'M') + p3[0].toFixed(1) + ' ' + p3[1].toFixed(1); }
+    s += '<defs><linearGradient id="rg" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#635bff" stop-opacity=".62"/><stop offset="100%" stop-color="#00d4ff" stop-opacity=".48"/></linearGradient></defs>';
+    s += '<path d="' + dd + 'Z" fill="url(#rg)" stroke="#635bff" stroke-width="2" stroke-linejoin="round"/>';
+    for (var i4 = 0; i4 < n; i4++) { var p4 = pt(i4, R * clamp(vals[i4], 0, 100) / 100); s += '<circle cx="' + p4[0].toFixed(1) + '" cy="' + p4[1].toFixed(1) + '" r="4" fill="#fff" stroke="#635bff" stroke-width="2.5"/>'; }
+    for (var i5 = 0; i5 < n; i5++) {
+      var lp = pt(i5, R + 26), anc = 'middle';
+      if (lp[0] > cx + 6) anc = 'start'; else if (lp[0] < cx - 6) anc = 'end';
+      s += '<text x="' + lp[0].toFixed(1) + '" y="' + (lp[1] + 4).toFixed(1) + '" text-anchor="' + anc + '" font-size="11.5" font-weight="700" fill="#425466" font-family="PingFang SC,Microsoft YaHei,sans-serif">' + esc(labels[i5]) + '</text>';
+      s += '<text x="' + lp[0].toFixed(1) + '" y="' + (lp[1] + 17).toFixed(1) + '" text-anchor="' + anc + '" font-size="10.5" font-weight="700" fill="#635bff" font-family="Inter,sans-serif">' + Math.round(vals[i5]) + '</text>';
+    }
+    return s + '</svg>';
+  }
+
+  var RADAR_LABELS = ['词汇精确', '语法意义', '句子结构', '歧义识别', '输出清晰'];
+  var RADAR_KEYS = ['vocab', 'gram', 'sent', 'amb', 'out'];
+
+  /* ========================================================
+     视图：今日学习
+     ======================================================== */
+  /* ---------- 循序渐进：学段 → 年级 → 阶段（每 7 天推进一个阶段） ---------- */
+  var LEVEL_NAMES = ['意义锚定', '意义辨微', '意义输出'];
+  var LEVEL_DAYS = ['第 1–7 天', '第 8–14 天', '第 15 天起'];
+  var LEVEL_FOCUS = [
+    '在真实语境中锁定本阶段词语的唯一含义，先建立「看语境、再定词义」的习惯。',
+    '用最小对比对划清近义与多义的边界，识别语法结构所贡献的细微意义。',
+    '在真实语料与写作中检验精确表意，把输入转化为无歧义的输出。'
+  ];
+
+  /* 当前年级 */
+  function CUR() {
+    if (window.DB && DB.gradeMap && DB.gradeMap[S.grade]) return DB.gradeMap[S.grade];
+    return (window.DBX && DBX.GRADES && DBX.GRADES[0]) ||
+      { k: 'g3', seg: 'primary', n: 3, name: '三年级', goal: '', topics: [], words: [], gram: [], syn: [], poly: [], chal: [] };
+  }
+  function SEG() {
+    var g = CUR();
+    return (window.DBX && DBX.SEGS ? DBX.SEGS.filter(function (s) { return s.k === g.seg; })[0] : null) ||
+      { k: g.seg || 'primary', name: '小学', short: '小', range: '', color: '#00b8a9', desc: '' };
+  }
+  function slice3(arr) {
+    arr = arr || [];
+    var n = arr.length;
+    if (!n) return [[], [], []];
+    var a = Math.max(1, Math.ceil(n / 3)), b = Math.max(a + 1, Math.ceil(n * 2 / 3));
+    return [arr.slice(0, a), arr.slice(a, b), arr.slice(b)];
+  }
+  var _lvCache = { k: '', v: null };
+  function LEVELS(G) {
+    G = G || CUR();
+    if (_lvCache.k === G.k) return _lvCache.v;
+    var w = slice3(G.words), g = slice3(G.gram), s = slice3(G.syn), p = slice3(G.poly), c = slice3(G.chal);
+    var v = {};
+    for (var i = 1; i <= 3; i++) {
+      v[i] = {
+        name: LEVEL_NAMES[i - 1], days: LEVEL_DAYS[i - 1], focus: LEVEL_FOCUS[i - 1],
+        words: w[i - 1], gram: g[i - 1], syn: s[i - 1], poly: p[i - 1], chal: c[i - 1]
+      };
+    }
+    _lvCache.k = G.k; _lvCache.v = v;
+    return v;
+  }
+  /* 当前年级的词/技能是否纳入筛选（scope = grade 时只看本年级） */
+  function inScope(grade) {
+    if (S.scope === 'all') return true;
+    return !grade || grade === S.grade || grade === 'adv';
+  }
+  function scopeWords() {
+    var G = CUR();
+    return G.words && G.words.length ? G.words : DB.words.map(function (w) { return w.w; });
+  }
+
+  function pathDay() {
+    if (!S.start) { S.start = today(); save(); }
+    var diff = Math.round((Date.parse(today()) - Date.parse(S.start)) / DAY);
+    return Math.max(1, diff + 1);
+  }
+  function curLevel() { return Math.min(3, Math.ceil(pathDay() / 7)); }
+  function byName(n) { return DB.words.filter(function (x) { return x.w === n; })[0]; }
+  function gramTitle(id) { var g = DB.grammar.filter(function (x) { return x.id === id; })[0]; return g ? g.title : id; }
+  function synTitle(id) { var g = DB.syn.filter(function (x) { return x.id === id; })[0]; return g ? g.title : id; }
+  function doneToday(w) { return !!(S.words[w] && S.words[w].last === today()); }
+
+  /* 今日计划：新学（本阶段未学）+ 复习（记忆盒到期）+ 本阶段指定语法/近义/多义/挑战 */
+  function todayPlan() {
+    var G = CUR();
+    var d = pathDay(), lv = curLevel(), L = LEVELS(G)[lv];
+    var fresh = L.words.filter(function (w) { return !S.words[w]; }).slice(0, 3);
+    var dueAll = Object.keys(S.words).filter(function (w) { return S.words[w].next <= Date.now() && !doneToday(w); });
+    var inLv = dueAll.filter(function (w) { return L.words.indexOf(w) >= 0; });
+    var outLv = dueAll.filter(function (w) { return L.words.indexOf(w) < 0; });
+    var review = inLv.concat(outLv).slice(0, 7);
+    var gram = L.gram.filter(function (id) { return S.seen.gram.indexOf(id) < 0; })[0] || L.gram[0] || G.gram[0];
+    var syn = L.syn.filter(function (id) { return S.seen.syn.indexOf(id) < 0; })[0] || L.syn[0] || G.syn[0];
+    var poly = L.poly.filter(function (w) { return S.seen.poly.indexOf(w) < 0; })[0] || L.poly[0] || G.poly[0];
+    var chal = L.chal.filter(function (i) { return S.seen.chal.indexOf(i) < 0; }).slice(0, 5);
+    if (chal.length < 3) chal = G.chal.filter(function (i) { return S.seen.chal.indexOf(i) < 0; }).slice(0, 5);
+    if (!chal.length) chal = (G.chal.length ? G.chal : L.chal).slice(0, 5);
+    if (!fresh.length && !review.length) {
+      // 本阶段与到期复习都已完成 → 从本年级未学词中再补 3 个
+      fresh = G.words.filter(function (w) { return !S.words[w]; }).slice(0, 3);
+    }
+    return { day: d, lv: lv, L: L, G: G, fresh: fresh, review: review, gram: gram, syn: syn, poly: poly, chal: chal, words: fresh.concat(review) };
+  }
+
+  function vToday() {
+    var p = todayPlan(), L = p.L, G = p.G, seg = SEG();
+    var lvDone = L.words.filter(function (w) { return S.words[w]; }).length;
+    var lvPct = L.words.length ? Math.round(lvDone / L.words.length * 100) : 0;
+
+    var steps = [
+      { ic: '◈', n: '新学 ' + p.fresh.length + ' 个词', d: p.fresh.length ? p.fresh.join(' · ') : '本阶段新词已学完，今日以复习为主', go: 'vocab|card', got: p.fresh.filter(doneToday).length, tot: Math.max(1, p.fresh.length) },
+      { ic: '↻', n: '复习 ' + p.review.length + ' 个到期词', d: '由记忆盒间隔自动安排，答错会回到第 1 盒', go: 'vocab|card', got: p.review.filter(doneToday).length, tot: Math.max(1, p.review.length) },
+      { ic: '⇄', n: '近义词辨析 · ' + synTitle(p.syn), d: '最小对比对，划清不可替代的语义特征', go: 'vocab|syn|' + p.syn, got: S.seen.syn.indexOf(p.syn) >= 0 ? 1 : 0, tot: 1 },
+      { ic: '⑃', n: '一词多义 · ' + p.poly, d: '按意义分支识别当前语境', go: 'vocab|poly|' + p.poly, got: S.seen.poly.indexOf(p.poly) >= 0 ? 1 : 0, tot: 1 },
+      { ic: '◇', n: '语法意义 · ' + gramTitle(p.gram), d: '看懂结构所贡献的意义', go: 'grammar|' + p.gram, got: S.seen.gram.indexOf(p.gram) >= 0 ? 1 : 0, tot: 1 },
+      { ic: '▣', n: '真实语料挑战 ' + p.chal.length + ' 题', d: '解释每个词为何如此使用', go: 'corpus|quiz', got: p.chal.filter(function (i) { return S.seen.chal.indexOf(i) >= 0; }).length, tot: p.chal.length },
+      { ic: '✎', n: '写作意义批改', d: '逐句检测意义明确性', go: 'write', got: Math.min(1, S.done.write || 0), tot: 1 }
+    ];
+    var total = 0, tgot = 0;
+    var trows = steps.map(function (t, i) {
+      total += t.tot; tgot += Math.min(t.got, t.tot);
+      var pct = Math.min(100, Math.round(t.got / t.tot * 100));
+      return '<div class="task fadein" data-act="goto" data-go="' + t.go + '">' +
+        '<div class="ti">' + t.ic + '</div>' +
+        '<div style="flex:1;min-width:0"><div class="tn">' + (i + 1) + '. ' + esc(t.n) + ' <span class="muted" style="font-weight:600">' + Math.min(t.got, t.tot) + '/' + t.tot + '</span></div>' +
+        '<div class="td" style="overflow:hidden;text-overflow:ellipsis">' + esc(t.d) + '</div>' +
+        '<div class="bar" style="margin-top:7px"><i style="width:' + pct + '%"></i></div></div>' +
+        '<div class="go">' + (pct >= 100 ? '✓ 完成' : '开始 →') + '</div></div>';
+    }).join('');
+
+    var m = RADAR_KEYS.map(function (k) { return S.mastery[k] || 0; });
+    var overall = Math.round(m.reduce(function (a, b) { return a + b; }, 0) / 5);
+    var learned = Object.keys(S.words).length;
+    var mastered = Object.keys(S.words).filter(function (w) { return S.words[w].box >= 3; }).length;
+
+    // 近 14 天轨迹
+    var days = [], now = Date.now();
+    for (var i = 13; i >= 0; i--) {
+      var d = new Date(now - i * DAY), key = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+      var rec = S.history.filter(function (h) { return h.date === key; })[0];
+      days.push({ key: key, v: rec ? rec.score : 0, label: (d.getMonth() + 1) + '/' + d.getDate() });
+    }
+    var maxV = Math.max(60, Math.max.apply(null, days.map(function (d) { return d.v; })));
+    var bars = days.map(function (d) {
+      var h = Math.round(d.v / maxV * 62);
+      return '<div style="flex:1;text-align:center">' +
+        '<div style="height:62px;display:flex;align-items:flex-end;justify-content:center">' +
+        '<div title="' + d.label + ' 明确度 ' + d.v + '" style="width:74%;max-width:22px;height:' + Math.max(3, h) + 'px;border-radius:5px 5px 2px 2px;background:' +
+        (d.v ? 'linear-gradient(180deg,#635bff,#00d4ff)' : 'rgba(10,37,64,.08)') + '"></div></div>' +
+        '<div style="font-size:9.5px;color:#8792a2;margin-top:5px;font-weight:600">' + d.label + '</div></div>';
+    }).join('');
+
+    /* 课程体系选择器：学段 → 年级 */
+    var segChips = (window.DBX && DBX.SEGS ? DBX.SEGS : []).map(function (s) {
+      return '<div class="chip' + (s.k === seg.k ? ' on' : '') + '" data-act="setseg" data-k="' + s.k + '">' + s.name + '</div>';
+    }).join('');
+    var gChips = ((DB.segGrades && DB.segGrades[seg.k]) || []).map(function (g) {
+      var dn = g.words.filter(function (w) { return S.words[w]; }).length;
+      return '<div class="chip' + (g.k === S.grade ? ' on' : '') + '" data-act="setgrade" data-k="' + g.k + '">' +
+        g.name + ' <span style="opacity:.65;font-weight:600">' + dn + '/' + g.words.length + '</span></div>';
+    }).join('');
+    var topicChips = (G.topics || []).map(function (t) { return '<span class="chip" style="cursor:default">' + esc(t) + '</span>'; }).join('');
+    var gw = G.words.length, gDone = G.words.filter(function (w) { return S.words[w]; }).length;
+    var gPct = gw ? Math.round(gDone / gw * 100) : 0;
+    var picker = '<div class="card fadein" style="background:linear-gradient(135deg,rgba(99,91,255,.07),rgba(0,212,255,.05));border-color:rgba(99,91,255,.18)">' +
+      '<div class="h"><h3>课程体系 · 小学 → 高中</h3><span class="sp"></span>' +
+      '<span class="muted">10 个年级 · ' + DB.words.length + ' 词 · ' + DB.grammar.length + ' 个语法意义点</span></div>' +
+      '<div class="row" style="gap:8px">' + segChips + '</div>' +
+      '<div class="row mt" style="gap:6px">' + gChips + '</div>' +
+      '<div class="row mt2" style="justify-content:space-between;align-items:flex-start;gap:12px">' +
+      '<div style="flex:1;min-width:0"><div style="font-weight:750;font-size:14px">' + esc(G.name) + ' · ' + esc(G.label) + '</div>' +
+      '<div class="muted" style="margin-top:5px;line-height:1.7">' + esc(G.goal) + '</div>' +
+      '<div class="row mt" style="gap:5px">' + topicChips + '</div></div>' +
+      '<div style="text-align:right;flex:0 0 auto"><div style="font-size:24px;font-weight:800;letter-spacing:-1px;color:' + seg.color + '">' + gPct + '%</div>' +
+      '<div class="muted">本年级 ' + gDone + '/' + gw + ' 词</div></div></div>' +
+      '<div class="bar" style="margin-top:10px"><i style="width:' + gPct + '%"></i></div>' +
+      '<div class="muted" style="margin-top:8px">切换年级会从第 1 天重新开始本年级的三个阶段（每 7 天推进一阶），已学过的词仍由记忆盒继续安排复习。</div>' +
+      '</div>';
+
+    return '' +
+      picker +
+
+      '<div class="grid g4 mt2">' +
+      '<div class="stat brand"><div class="n">' + tgot + '</div><div class="l">今日完成步骤</div><div class="d" style="color:#635bff">共 ' + total + ' 步</div></div>' +
+      '<div class="stat amber"><div class="n">' + S.streak + '</div><div class="l">连续学习天数</div><div class="d" style="color:#b45309">累计 ' + sumDone() + ' 次练习</div></div>' +
+      '<div class="stat cyan"><div class="n">' + learned + '</div><div class="l">已学词条</div><div class="d" style="color:#0369a1">已巩固 ' + mastered + ' 词</div></div>' +
+      '<div class="stat green"><div class="n">' + overall + '</div><div class="l">意义明确度</div><div class="d" style="color:#15803d">五维能力均值</div></div>' +
+      '</div>' +
+
+      /* 阶段进度卡 */
+      '<div class="card mt2" style="background:linear-gradient(135deg,rgba(99,91,255,.09),rgba(0,212,255,.06));border-color:rgba(99,91,255,.2)">' +
+      '<div class="row" style="justify-content:space-between;align-items:flex-start;gap:12px">' +
+      '<div style="flex:1;min-width:0">' +
+      '<div class="row" style="gap:8px"><span class="pill">' + esc(G.name) + '</span>' +
+      '<span class="pill">第 ' + p.day + ' 天</span>' +
+      '<span class="pill c">阶段 ' + p.lv + '/3 · ' + esc(L.name) + '</span>' +
+      '<span class="muted">' + esc(L.days) + '</span></div>' +
+      '<div style="font-weight:750;font-size:15px;margin-top:9px">' + esc(L.focus) + '</div>' +
+      '</div>' +
+      '<div style="text-align:right;flex:0 0 auto"><div style="font-size:26px;font-weight:800;letter-spacing:-1px;color:var(--brand)">' + lvPct + '%</div>' +
+      '<div class="muted">本阶段 ' + lvDone + '/' + L.words.length + ' 词</div></div>' +
+      '</div>' +
+      '<div class="bar" style="margin-top:12px"><i style="width:' + lvPct + '%"></i></div>' +
+      '<div class="muted" style="margin-top:9px">路径规则：每次新学 3 个本阶段新词，同时按记忆盒间隔复习到期旧词；本阶段内容学完后自动进入下一阶段。</div>' +
+      '</div>' +
+
+      '<div class="grid g2 mt2" style="align-items:stretch">' +
+      '<div class="card"><div class="h"><h3>今日学习路径</h3><span class="sp"></span><span class="pill">' + Math.round(tgot / total * 100) + '%</span></div>' +
+      '<div class="grid" style="gap:10px">' + trows + '</div></div>' +
+
+      '<div class="card"><div class="h"><h3>能力雷达</h3><span class="sp"></span><span class="muted">基于练习表现动态更新</span></div>' +
+      '<div class="radar">' + radar(m, RADAR_LABELS, 300) + '</div>' +
+      '<div class="divider"></div>' +
+      '<div class="muted" style="font-weight:650;margin-bottom:8px">近 14 天 · 表意明确度轨迹</div>' +
+      '<div style="display:flex;gap:4px;align-items:flex-end">' + bars + '</div>' +
+      '</div></div>' +
+
+      '<div class="card mt2"><div class="h"><h3>核心理念 · 一切皆为意义</h3></div>' +
+      '<div class="grid g3">' +
+      '<div><div style="font-weight:750;font-size:13.5px">词汇层 · 唯一且恰当</div><div class="muted" style="margin-top:4px;line-height:1.7">每个词在上下文中应有唯一且恰当的含义。<span class="en hl">I run a company</span> 中 run 必须理解为“经营”，而非“跑”。</div></div>' +
+      '<div><div style="font-weight:750;font-size:13.5px">句法层 · 结构即意义</div><div class="muted" style="margin-top:4px;line-height:1.7"><span class="en hl">He is being polite</span> 中 being 强调“临时表现”，与 <span class="en">He is polite</span>（一贯特性）意义截然不同。</div></div>' +
+      '<div><div style="font-weight:750;font-size:13.5px">语用层 · 无逻辑模糊</div><div class="muted" style="margin-top:4px;line-height:1.7">整个句子的表意指向必须清晰；歧义结构必须通过语境或改写消除。</div></div>' +
+      '</div></div>';
+  }
+  function sumDone() { return Object.keys(S.done).reduce(function (a, k) { return a + (S.done[k] || 0); }, 0); }
+
+  /* ========================================================
+     视图：词汇意义解码
+     ======================================================== */
+  var vocabTab = 'card';
+  var curWord = null, curPoly = null, curSyn = null;
+
+  function vVocab() {
+    var tabs = '<div class="tabs">' +
+      tab('card', '语境词卡') + tab('syn', '近义词辨析') + tab('poly', '一词多义') + tab('root', '词根网络') +
+      '</div>';
+    var body = vocabTab === 'card' ? tCard() : vocabTab === 'syn' ? tSyn() : vocabTab === 'poly' ? tPoly() : tRoot();
+    return tabs + body;
+  }
+  function tab(k, n) { return '<div class="tab' + (vocabTab === k ? ' on' : '') + '" data-act="vtab" data-k="' + k + '">' + n + '</div>'; }
+
+  /* --- 语境词卡 --- */
+  function nextWord() {
+    // 优先推进今日路径：先本阶段新词，再记忆盒到期的复习词
+    var p = todayPlan();
+    var pend = p.words.filter(function (w) { return !doneToday(w); });
+    for (var i = 0; i < pend.length; i++) { var o = byName(pend[i]); if (o) return o; }
+    // 今日路径已完成 → 继续巩固本阶段记忆盒较低的词
+    var weak = p.L.words.filter(function (w) { return S.words[w] && S.words[w].box < 3; });
+    if (weak.length) { var o2 = byName(weak[Math.floor(Math.random() * weak.length)]); if (o2) return o2; }
+    var gw = scopeWords();
+    for (var t = 0; t < 12; t++) {
+      var o3 = byName(gw[Math.floor(Math.random() * gw.length)]);
+      if (o3) return o3;
+    }
+    return DB.words[Math.floor(Math.random() * DB.words.length)];
+  }
+  function tCard() {
+    if (!curWord) { curWord = nextWord(); curWord._si = Math.floor(Math.random() * curWord.senses.length); curWord._done = false; }
+    var w = curWord, s = w.senses[w._si];
+    var _g = CUR(), gwAll = _g.words.length, gwDone = _g.words.filter(function (x) { return S.words[x]; }).length;
+    var fill = s.ex.replace(new RegExp('\\b' + w.w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\w*', 'i'), '<span class="gap">?</span>');
+    var rec = S.words[w.w];
+    var gwSet = {}; scopeWords().forEach(function (x) { gwSet[x] = 1; });
+    var localPool = DB.words.filter(function (x) { return x.w !== w.w && gwSet[x.w]; });
+    if (localPool.length < 6) localPool = DB.words.filter(function (x) { return x.w !== w.w; });
+    var opts = pick(localPool, 6)
+      .reduce(function (a, x) { return a.concat(x.senses.map(function (y) { return y.g; })); }, []);
+    var all = shuffle([s.g].concat(shuffle(opts).slice(0, 3)));
+
+    var html = '<div class="card fadein">' +
+      '<div class="h"><h3>语境中锁定词义</h3><span class="sp"></span>' +
+      '<span class="pill ' + (todayPlan().fresh.indexOf(w.w) >= 0 ? '' : 'c') + '">' + (todayPlan().fresh.indexOf(w.w) >= 0 ? '本阶段新词' : (rec ? '复习 · 记忆盒 ' + (rec.box + 1) : '新词')) + '</span>' +
+      '<span class="pill">' + (rec ? '第 ' + (rec.seen + 1) + ' 次' : '首次') + '</span></div>' +
+      '<div class="wordcard"><div class="w en">' + w.w + '</div><div class="ph">' + w.ph + '</div>' +
+      '<div class="tagrow"><span class="pill c">' + w.tag + '</span><span class="pill">' + w.senses.length + ' 个意义分支</span>' +
+      '<span class="pill ' + (w.tier === 'core' ? 'g' : '') + '">' + (w.tier === 'core' ? '精讲层' : '考纲覆盖') + '</span></div></div>' +
+      '<div class="sentence">' + fill + '<span class="zh">' + s.zh + '</span></div>' +
+      '<div class="q">在此语境中，该词的精确意义是：</div>' +
+      '<div class="opts" id="wopts">' + all.map(function (o, i) {
+        return '<button class="opt" data-act="wans" data-i="' + i + '"><span class="k">' + 'ABCD'[i] + '</span><span>' + esc(o) + '</span></button>';
+      }).join('') + '</div>' +
+      '<div id="wexp"></div>' +
+      '<div class="row mt" style="justify-content:space-between">' +
+      '<div class="muted">' + esc(CUR().name) + ' 已学 ' + gwDone + '/' + gwAll + ' 词 · 今日 ' + (S.done.vocab || 0) + ' 张</div>' +
+      '<button class="btn gh sm" data-act="wnext">跳过 → 下一个</button></div>' +
+      '</div>';
+    return html;
+  }
+  function ansWord(btn, i) {
+    if (!curWord || curWord._done) return;
+    curWord._done = true;
+    var w = curWord, s = w.senses[w._si];
+    var chosen = btn.querySelector('span:last-child').textContent;
+    var ok = chosen === s.g;
+    $$('#wopts .opt').forEach(function (b, idx) {
+      b.classList.add('dis');
+      var txt = b.querySelector('span:last-child').textContent;
+      if (txt === s.g) b.classList.add('ok');
+      else if (idx === i) b.classList.add('no');
+    });
+    bump('vocab', ok);
+    if (ok) srsUp(w.w); else { srsDown(w.w); addWrong({ key: 'w:' + w.w + ':' + w._si, type: '词汇', title: w.w + ' — ' + s.ex, q: '在此语境中的意义', ans: s.g, why: s.g + ' ｜ ' + s.ex }); }
+    var other = w.senses.filter(function (x, k) { return k !== w._si; }).map(function (x) {
+      return '<li><b>' + esc(x.g) + '</b> — <span class="en">' + esc(x.ex) + '</span><br><span class="muted">' + esc(x.zh) + '</span></li>';
+    }).join('');
+    $('#wexp').innerHTML = '<div class="explain ' + (ok ? 'good' : 'bad') + '">' +
+      '<div class="hd">' + (ok ? '<span class="pill g">✓ 正确</span>' : '<span class="pill r">✗ 正确答案：' + esc(s.g) + '</span>') + ' 意义解析</div>' +
+      '<div style="margin-top:8px"><b>完整语境：</b><span class="en">' + esc(s.ex) + '</span><br><span class="muted">' + esc(s.zh) + '</span></div>' +
+      '<div style="margin-top:7px"><b>英文释义：</b><span class="en">' + esc(s.en) + '</span></div>' +
+      (w.col ? '<div style="margin-top:7px"><b>常用搭配：</b>' + w.col.map(function (c) {
+        return '<span class="pill en" style="margin:0 5px 4px 0;display:inline-block">' + esc(c) + '</span>';
+      }).join('') + '</div>' : '') +
+      (w.rt && w.rt.m ? '<div style="margin-top:7px"><b>词根关联：</b><span class="muted">' + esc(w.rt.m) + '</span></div>' : '') +
+      (other ? '<div style="margin-top:7px"><b>该词其他意义分支：</b><ul class="clean">' + other + '</ul></div>' : '') +
+      '</div><div class="row mt" style="justify-content:center"><button class="btn" data-act="wnext">继续 →</button></div>';
+    $('#wexp').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  /* --- 近义词辨析 --- */
+  function tSyn() {
+    var pool = DB.syn.filter(function (x) { return inScope(x.g); });
+    if (!pool.length) pool = DB.syn;
+    if (!curSyn || pool.indexOf(curSyn) < 0) curSyn = pool[0];
+    var g = curSyn;
+    var chips = pool.map(function (x) {
+      var seen = S.seen.syn.indexOf(x.id) >= 0;
+      return '<div class="chip' + (x.id === g.id ? ' on' : '') + '" data-act="synpick" data-k="' + x.id + '">' +
+        (seen ? '✓ ' : '') + x.title + '</div>';
+    }).join('');
+    var items = g.items.map(function (it) {
+      return '<tr><td style="width:88px"><b class="en" style="font-size:15px">' + it.w + '</b></td>' +
+        '<td style="width:96px"><span class="pill">' + esc(it.core) + '</span></td>' +
+        '<td>' + esc(it.must) + '<div class="muted" style="margin-top:5px"><span class="en">' + esc(it.ex) + '</span> — ' + esc(it.zh) + '</div>' +
+        '<div style="color:#b91c1c;font-size:12.5px;margin-top:4px;font-weight:600">' + esc(it.wrong) + '</div></td></tr>';
+    }).join('');
+    return '<div class="card fadein">' +
+      '<div class="h"><h3>近义词精准辨析</h3><span class="sp"></span>' + scopeBar(pool.length + ' 组') + '</div>' +
+      '<div class="row" style="gap:6px">' + chips + '</div>' +
+      '<div class="explain mt" style="background:rgba(99,91,255,.06);border-color:rgba(99,91,255,.18)">' + esc(g.note) + '</div>' +
+      '<table class="mt2"><thead><tr><th>词</th><th>意义核心</th><th>不可替代的语义特征 / 最小对比对</th></tr></thead><tbody>' + items + '</tbody></table>' +
+      '<div class="divider"></div>' +
+      '<div class="q">强制理解 · 选择最符合本句意义的词</div>' +
+      '<div class="sentence en">' + esc(g.quiz.ex) + '</div>' +
+      '<div class="opts" id="sopts">' + g.quiz.options.map(function (o, i) {
+        return '<button class="opt" data-act="sans" data-i="' + i + '"><span class="k">' + 'ABCD'[i] + '</span><span class="en">' + esc(o) + '</span></button>';
+      }).join('') + '</div><div id="sexp"></div>' +
+      '</div>';
+  }
+  function ansSyn(btn, i) {
+    if (!curSyn) return;
+    var g = curSyn, ok = i === g.quiz.ans;
+    $$('#sopts .opt').forEach(function (b, idx) {
+      b.classList.add('dis');
+      if (idx === g.quiz.ans) b.classList.add('ok'); else if (idx === i) b.classList.add('no');
+    });
+    if (S.seen.syn.indexOf(g.id) < 0) S.seen.syn.push(g.id);
+    bump('syn', ok);
+    if (!ok) addWrong({ key: 's:' + g.id, type: '近义辨析', title: g.title, q: g.quiz.ex, ans: g.quiz.options[g.quiz.ans], why: g.quiz.why });
+    $('#sexp').innerHTML = '<div class="explain ' + (ok ? 'good' : 'bad') + '">' +
+      '<div class="hd">' + (ok ? '<span class="pill g">✓ 正确</span>' : '<span class="pill r">✗ 应为 ' + esc(g.quiz.options[g.quiz.ans]) + '</span>') + ' 为什么</div>' +
+      '<div style="margin-top:6px">' + esc(g.quiz.why) + '</div></div>';
+  }
+
+  /* --- 一词多义 --- */
+  function tPoly() {
+    var pool = DB.poly.filter(function (x) { return inScope(x.g); });
+    if (!pool.length) pool = DB.poly;
+    if (!curPoly || pool.indexOf(curPoly) < 0) curPoly = pool[0];
+    var p = curPoly;
+    var chips = pool.map(function (x) {
+      return '<div class="chip' + (x.w === p.w ? ' on' : '') + '" data-act="polypick" data-k="' + x.w + '">' + x.w + '</div>';
+    }).join('');
+    var senses = p.senses.map(function (s, i) {
+      return '<div class="rnode" style="max-width:none;flex:1 1 260px"><div class="w">' + (i + 1) + '. ' + esc(s.g) + '</div>' +
+        '<div class="m en">' + esc(s.ex) + '</div></div>';
+    }).join('');
+    var quiz = p.quiz.map(function (q, qi) {
+      return '<div class="card" style="box-shadow:none;background:rgba(255,255,255,.6)">' +
+        '<div class="q">' + (qi + 1) + ') <span class="en">' + esc(q.ex) + '</span></div>' +
+        '<div class="opts">' + q.options.map(function (o, oi) {
+          return '<button class="opt" data-act="pans" data-q="' + qi + '" data-i="' + oi + '"><span class="k">' + 'ABCD'[oi] + '</span><span>' + esc(o) + '</span></button>';
+        }).join('') + '</div><div id="pexp' + qi + '"></div></div>';
+    }).join('');
+    return '<div class="card fadein">' +
+      '<div class="h"><h3>一词多义 · 意义分支</h3><span class="sp"></span>' + scopeBar(pool.length + ' 个多义词') + '</div>' +
+      '<div class="row" style="gap:6px">' + chips + '</div>' +
+      '<div class="wordcard mt" style="text-align:left;display:flex;align-items:baseline;gap:12px">' +
+      '<div class="w en" style="font-size:34px">' + p.w + '</div><div class="ph">' + p.ph + '</div></div>' +
+      '<div class="rootnet" style="justify-content:flex-start;margin-top:6px">' + senses + '</div>' +
+      '<div class="divider"></div>' +
+      '<div class="q">语境判定 · 为下面每个句子选择对应意义分支</div>' +
+      '<div class="grid" style="gap:12px">' + quiz + '</div>' +
+      '</div>';
+  }
+  function ansPoly(btn, qi, i) {
+    if (!curPoly || !curPoly.quiz[qi]) return;
+    var p = curPoly, q = p.quiz[qi], ok = i === q.ans;
+    var box = btn.parentNode;
+    $$('.opt', box).forEach(function (b, idx) {
+      b.classList.add('dis');
+      if (idx === q.ans) b.classList.add('ok'); else if (idx === i) b.classList.add('no');
+    });
+    if (S.seen.poly.indexOf(p.w + qi) < 0) { S.seen.poly.push(p.w + qi); bump('poly', ok); }
+    if (!ok) addWrong({ key: 'p:' + p.w + qi, type: '一词多义', title: p.w + ' — ' + q.ex, q: '该语境中的意义分支', ans: q.options[q.ans], why: q.why });
+    $('#pexp' + qi).innerHTML = '<div class="explain ' + (ok ? 'good' : 'bad') + '">' +
+      '<div class="hd">' + (ok ? '<span class="pill g">✓ 正确</span>' : '<span class="pill r">✗ 应为 ' + esc(q.options[q.ans]) + '</span>') + '</div>' +
+      '<div style="margin-top:6px">' + esc(q.why) + '</div></div>';
+  }
+
+  /* --- 词根网络 --- */
+  var curRoot = null;
+  function tRoot() {
+    if (!curRoot) curRoot = DB.roots[0].root;
+    var r = DB.roots.filter(function (x) { return x.root === curRoot; })[0];
+    var chips = DB.roots.map(function (x) {
+      return '<div class="chip' + (x.root === curRoot ? ' on' : '') + '" data-act="rootpick" data-k="' + x.root + '">' + x.root + '</div>';
+    }).join('');
+    var nodes = r.words.map(function (w) {
+      return '<div class="rnode"><div class="w">' + w.w + '</div><div class="m">' + esc(w.m) + '</div></div>';
+    }).join('');
+    var all = DB.roots.map(function (x) { return x.words.length; }).reduce(function (a, b) { return a + b; }, 0);
+    return '<div class="card fadein">' +
+      '<div class="h"><h3>词根词缀意义网络</h3><span class="sp"></span><span class="muted">共 ' + DB.roots.length + ' 个词根 · ' + all + ' 个派生词 · 记一个、认一串</span></div>' +
+      '<div class="row" style="gap:6px">' + chips + '</div>' +
+      '<div class="rootnet mt2"><div class="rcenter"><div class="r">' + r.root + '</div><div class="m">' + esc(r.mean) + '</div></div>' + nodes + '</div>' +
+      '<div class="explain mt2">规律：英语中约 <b>70%</b> 的单词由词根词缀构成。掌握 <b>' + r.root + '</b>（' + esc(r.mean) + '）这一意义内核，即可在不查词典的情况下推断出上表全部 ' + r.words.length + ' 个词的基本含义方向。</div>' +
+      '</div>';
+  }
+
+  /* ========================================================
+     视图：语法意义地图
+     ======================================================== */
+  var curGram = null;
+  function vGrammar() {
+    var pool = DB.grammar.filter(function (x) { return inScope(x.g); });
+    if (!pool.length) pool = DB.grammar;
+    if (!curGram || !pool.filter(function (x) { return x.id === curGram; }).length) curGram = pool[0].id;
+    var g = pool.filter(function (x) { return x.id === curGram; })[0] || DB.grammar.filter(function (x) { return x.id === curGram; })[0];
+    var list = pool.slice().sort(function (a, b) { return b.weight - a.weight; }).map(function (x) {
+      var seen = S.seen.gram.indexOf(x.id) >= 0;
+      return '<div class="task' + (x.id === curGram ? '' : '') + '" data-act="gpick" data-k="' + x.id + '" style="' + (x.id === curGram ? 'border-color:#635bff;background:#fff' : '') + '">' +
+        '<div class="ti" style="background:' + (x.id === curGram ? '#635bff;color:#fff' : 'var(--brand-soft)') + '">◇</div>' +
+        '<div style="flex:1"><div class="tn">' + esc(x.title) + ' ' + (seen ? '<span class="pill g" style="font-size:10px">已掌握</span>' : '') + '</div>' +
+        '<div class="td">含义贡献度 ' + '★'.repeat(x.weight) + '<span style="opacity:.25">' + '★'.repeat(5 - x.weight) + '</span></div></div>' +
+        '<div class="go">' + (x.id === curGram ? '学习中' : '学习 →') + '</div></div>';
+    }).join('');
+
+    var pairs = g.pairs.map(function (p) {
+      return '<div class="box"><div class="s">' + esc(p.s) + '</div><div class="m">' + esc(p.m) + '</div></div>';
+    }).join('');
+    return '<div class="grid g2" style="align-items:start">' +
+      '<div class="card"><div class="h"><h3>语法意义地图</h3><span class="sp"></span>' +
+      scopeBar('本年级 ' + CUR().name + ' · ' + pool.length + ' 点') + '</div>' +
+      '<div class="grid" style="gap:8px">' + list + '</div></div>' +
+      '<div class="card fadein">' +
+      '<div class="h"><h3>' + esc(g.title) + '</h3></div>' +
+      '<div class="q">' + esc(g.q) + '</div>' +
+      '<ul class="clean">' + g.a.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>' +
+      '<div class="divider"></div>' +
+      '<div class="muted" style="font-weight:700;margin-bottom:6px">意义对比 · 最小对比对</div>' +
+      '<div class="cmp">' + pairs + '</div>' +
+      '<div class="divider"></div>' +
+      '<div class="q">思考式巩固 · ' + esc(g.quiz.q) + '</div>' +
+      '<div class="opts" id="gopts">' + g.quiz.options.map(function (o, i) {
+        return '<button class="opt" data-act="gans" data-i="' + i + '"><span class="k">' + 'ABCD'[i] + '</span><span class="en">' + esc(o) + '</span></button>';
+      }).join('') + '</div><div id="gexp"></div>' +
+      '</div></div>';
+  }
+  function ansGram(btn, i) {
+    var g = DB.grammar.filter(function (x) { return x.id === curGram; })[0];
+    if (!g) return;
+    var ok = i === g.quiz.ans;
+    $$('#gopts .opt').forEach(function (b, idx) {
+      b.classList.add('dis'); if (idx === g.quiz.ans) b.classList.add('ok'); else if (idx === i) b.classList.add('no');
+    });
+    if (S.seen.gram.indexOf(g.id) < 0) { S.seen.gram.push(g.id); bump('gram', ok); }
+    if (!ok) addWrong({ key: 'g:' + g.id, type: '语法意义', title: g.title, q: g.quiz.q, ans: g.quiz.options[g.quiz.ans], why: g.quiz.why });
+    $('#gexp').innerHTML = '<div class="explain ' + (ok ? 'good' : 'bad') + '">' +
+      '<div class="hd">' + (ok ? '<span class="pill g">✓ 正确</span>' : '<span class="pill r">✗ 应为 ' + esc(g.quiz.options[g.quiz.ans]) + '</span>') + ' 错误意义分析</div>' +
+      '<div style="margin-top:6px">' + esc(g.quiz.why) + '</div></div>';
+  }
+
+  /* ========================================================
+     视图：句子意义分析
+     ======================================================== */
+  var sentTab = 'annot', curSent = 0, curAmb = 0, ambDraft = '';
+  function vSentence() {
+    var tabs = '<div class="tabs">' +
+      '<div class="tab' + (sentTab === 'annot' ? ' on' : '') + '" data-act="stab" data-k="annot">成分意义标注</div>' +
+      '<div class="tab' + (sentTab === 'ambig' ? ' on' : '') + '" data-act="stab" data-k="ambig">歧义检测与修正</div>' +
+      '<div class="tab' + (sentTab === 'deep' ? ' on' : '') + '" data-act="stab" data-k="deep">长难句穿透</div>' +
+      '</div>';
+    return tabs + (sentTab === 'annot' ? tAnnot() : sentTab === 'ambig' ? tAmbig() : tDeep());
+  }
+  function tAnnot() {
+    var s = DB.sentences[curSent];
+    // 依原文顺序定位每个成分，未标注部分（逗号、空格）原样输出，保证句子完整还原
+    var body = '', pos = 0;
+    s.tokens.forEach(function (t) {
+      var key = t.t.replace(/[.,;:!?"']/g, '').trim();
+      var i = s.s.indexOf(key, pos);
+      if (i < 0) return;
+      if (i > pos) body += esc(s.s.slice(pos, i));
+      body += '<span class="tk ' + t.c + '" data-r="' + esc(t.r) + '" title="' + esc(t.n || t.r) + '">' + esc(s.s.slice(i, i + key.length)) + '</span>';
+      pos = i + key.length;
+    });
+    if (pos < s.s.length) body += esc(s.s.slice(pos));
+    var tbl = s.tokens.map(function (t) {
+      return '<tr><td class="en" style="width:26%"><b>' + esc(t.t) + '</b></td>' +
+        '<td style="width:24%"><span class="dot" style="background:var(--c-' + t.c + ')"></span>' + esc(t.r) + '</td>' +
+        '<td class="muted">' + esc(t.n || '—') + '</td></tr>';
+    }).join('');
+    var chips = DB.sentences.map(function (x, i) {
+      return '<div class="chip' + (i === curSent ? ' on' : '') + '" data-act="spick" data-k="' + i + '">句 ' + (i + 1) + '</div>';
+    }).join('');
+    var legend = [['agent', '施事'], ['verb', '谓语'], ['patient', '受事'], ['time', '时间'], ['link', '连接/逻辑'], ['degree', '程度'], ['cond', '条件/关涉'], ['ref', '指代'], ['extra', '补充信息']]
+      .map(function (x) { return '<span><i style="background:var(--c-' + x[0] + ')"></i>' + x[1] + '</span>'; }).join('');
+    return '<div class="card fadein">' +
+      '<div class="h"><h3>成分意义标注</h3><span class="sp"></span><span class="muted">悬停查看该成分对句义的贡献</span></div>' +
+      '<div class="row" style="gap:6px">' + chips + '</div>' +
+      '<div class="annot mt2">' + body + '</div>' +
+      '<div class="legend">' + legend + '</div>' +
+      '<div class="divider"></div>' +
+      '<div class="muted" style="margin-bottom:8px"><b>整句：</b>' + esc(s.zh) + '</div>' +
+      '<table><thead><tr><th>成分</th><th>语义角色</th><th>意义贡献</th></tr></thead><tbody>' + tbl + '</tbody></table>' +
+      '<div class="row mt" style="justify-content:space-between"><div class="muted">已分析 ' + (S.done.sent || 0) + ' 句</div>' +
+      '<button class="btn sm" data-act="sdone">标记已掌握</button></div>' +
+      '</div>';
+  }
+  function tAmbig() {
+    var a = DB.ambig[curAmb];
+    var chips = DB.ambig.map(function (x, i) {
+      return '<div class="chip' + (i === curAmb ? ' on' : '') + '" data-act="apick" data-k="' + i + '">' + (i + 1) + '</div>';
+    }).join('');
+    var reads = a.readings.map(function (r, i) {
+      return '<div class="box"><div style="font-weight:700;font-size:13px;color:var(--brand);margin-bottom:4px">' + esc(r.m) + '</div>' +
+        '<div class="s">' + esc(r.rw) + '</div><div class="m" style="margin-top:6px"><b>结构：</b>' + esc(r.note) + '</div></div>';
+    }).join('');
+    return '<div class="card fadein">' +
+      '<div class="h"><h3>歧义检测与修正</h3><span class="sp"></span><span class="muted">识别潜在歧义 → 改写为意义明确的版本</span></div>' +
+      '<div class="row" style="gap:6px">' + chips + '</div>' +
+      '<div class="sentence en mt2" style="font-size:19px">' + esc(a.s) + '</div>' +
+      '<div class="explain bad"><div class="hd">⚠ 歧义成因（风险等级：' + (a.score === 'high' ? '高' : '中') + '）</div>' + esc(a.why) + '</div>' +
+      '<div class="cmp mt2">' + reads + '</div>' +
+      '<div class="divider"></div>' +
+      '<div class="q">模糊句子修复 · 请写出一个意义明确的改写版本</div>' +
+      '<textarea class="editor" id="ambIn" style="min-height:96px" placeholder="Type your unambiguous rewrite here...">' + esc(ambDraft) + '</textarea>' +
+      '<div class="row mt"><button class="btn" data-act="ambsub">提交改写</button>' +
+      '<button class="btn gh sm" data-act="ambshow">看标准改写</button>' +
+      '<span class="muted">已修复 ' + (S.done.amb || 0) + ' 句</span></div>' +
+      '<div id="ambexp"></div>' +
+      '</div>';
+  }
+  function tDeep() {
+    var cards = DB.deepParse.map(function (d) {
+      return '<div class="card" style="box-shadow:none;background:rgba(255,255,255,.6)">' +
+        '<div class="sentence en">' + esc(d.s) + '<span class="zh">' + esc(d.zh) + '</span></div>' +
+        '<div class="kv"><div class="k">第一层 · 感知</div><div class="v">' + esc(d.l1) + '</div></div>' +
+        '<div class="kv"><div class="k">第二层 · 理解</div><div class="v">' + esc(d.l2) + '</div></div>' +
+        '<div class="kv"><div class="k">第三层 · 延伸</div><div class="v">' + esc(d.l3) + '</div></div>' +
+        '</div>';
+    }).join('');
+    return '<div class="card fadein"><div class="h"><h3>长难句三层穿透</h3><span class="sp"></span><span class="muted">感知 → 理解 → 延伸</span></div>' +
+      '<div class="grid" style="gap:12px">' + cards + '</div></div>';
+  }
+
+  /* ========================================================
+     视图：真实语料挑战
+     ======================================================== */
+  var corpusTab = 'quiz', cq = null, cqi = 0, cqOrder = [];
+  function vCorpus() {
+    var tabs = '<div class="tabs">' +
+      '<div class="tab' + (corpusTab === 'quiz' ? ' on' : '') + '" data-act="ctab" data-k="quiz">意义挑战</div>' +
+      '<div class="tab' + (corpusTab === 'fix' ? ' on' : '') + '" data-act="ctab" data-k="fix">模糊句子修复</div>' +
+      '</div>';
+    return tabs + (corpusTab === 'quiz' ? tChallenge() : tAmbig());
+  }
+  function newChallenge() {
+    var p = todayPlan();
+    var todo = p.chal.filter(function (i) { return S.seen.chal.indexOf(i) < 0; });
+    var pool = todo.length ? todo : p.L.chal.slice();
+    var rest = DB.challenge.map(function (_, i) { return i; }).filter(function (i) { return pool.indexOf(i) < 0; });
+    cqOrder = shuffle(pool).concat(shuffle(rest));
+    cqi = 0; cq = { right: 0, total: 0 };
+  }
+  function tChallenge() {
+    if (!cq) newChallenge();
+    if (cqi >= cqOrder.length) {
+      var pct = Math.round(cq.right / Math.max(1, cq.total) * 100);
+      return '<div class="card fadein center" style="padding:44px">' +
+        '<div style="font-size:52px;font-weight:800;letter-spacing:-2px;color:var(--brand)">' + pct + '<span style="font-size:24px">%</span></div>' +
+        '<div class="muted" style="margin-top:4px">本轮意义挑战 · 答对 ' + cq.right + ' / ' + cq.total + '</div>' +
+        '<div class="row mt2" style="justify-content:center"><button class="btn" data-act="cnew">再来一轮</button>' +
+        '<button class="btn gh" data-act="goto" data-go="write">去写作批改</button></div></div>';
+    }
+    var c = DB.challenge[cqOrder[cqi]];
+    return '<div class="card fadein">' +
+      '<div class="h"><h3>意义挑战</h3><span class="sp"></span>' +
+      '<span class="pill">' + (cqi + 1) + ' / ' + cqOrder.length + '</span>' +
+      '<span class="pill g">✓ ' + cq.right + '</span></div>' +
+      '<div class="muted" style="font-weight:700">语料来源：' + esc(c.src) + '</div>' +
+      '<div class="sentence en">' + esc(c.s) + '<span class="zh">' + esc(c.zh) + '</span></div>' +
+      '<div class="q">' + esc(c.q) + '</div>' +
+      '<div class="opts" id="copts">' + c.options.map(function (o, i) {
+        return '<button class="opt" data-act="cans" data-i="' + i + '"><span class="k">' + 'ABCD'[i] + '</span><span>' + esc(o) + '</span></button>';
+      }).join('') + '</div><div id="cexp"></div>' +
+      '</div>';
+  }
+  function ansChal(btn, i) {
+    if (!cq || cqi >= cqOrder.length) return;
+    var c = DB.challenge[cqOrder[cqi]], ok = i === c.ans;
+    $$('#copts .opt').forEach(function (b, idx) {
+      b.classList.add('dis'); if (idx === c.ans) b.classList.add('ok'); else if (idx === i) b.classList.add('no');
+    });
+    cq.total++; if (ok) cq.right++;
+    if (S.seen.chal.indexOf(cqOrder[cqi]) < 0) S.seen.chal.push(cqOrder[cqi]);
+    bump('corpus', ok);
+    if (!ok) addWrong({ key: 'c:' + cqOrder[cqi], type: '语料挑战', title: c.s, q: c.q, ans: c.options[c.ans], why: c.why });
+    $('#cexp').innerHTML = '<div class="explain ' + (ok ? 'good' : 'bad') + '">' +
+      '<div class="hd">' + (ok ? '<span class="pill g">✓ 正确</span>' : '<span class="pill r">✗ 正确答案见高亮</span>') + ' 意义分析</div>' +
+      '<div style="margin-top:6px">' + esc(c.why) + '</div>' +
+      '</div><div class="row mt" style="justify-content:center"><button class="btn" data-act="cnext">' + (cqi + 1 >= cqOrder.length ? '查看成绩' : '下一题 →') + '</button></div>';
+  }
+
+  /* ========================================================
+     视图：输出检验 · 写作意义批改
+     ======================================================== */
+  var lastReport = null;
+  function vWrite() {
+    var r = lastReport;
+    var out = '';
+    if (r) {
+      var dims = [['词汇精确', r.d.vocab, '#635bff'], ['意义密度', r.d.density, '#0ea5e9'], ['句式结构', r.d.struct, '#16a34a'], ['逻辑连贯', r.d.logic, '#f5a524'], ['表意清晰', r.d.clarity, '#e8367d']];
+      var rows = dims.map(function (d) {
+        return '<div style="margin-bottom:11px"><div class="row" style="justify-content:space-between;font-size:12.8px;font-weight:650">' +
+          '<span>' + d[0] + '</span><span style="color:' + d[2] + '">' + Math.round(d[1]) + '</span></div>' +
+          '<div class="bar" style="margin-top:4px"><i style="width:' + d[1] + '%;background:' + d[2] + '"></i></div></div>';
+      }).join('');
+      var issues = r.issues.length ? r.issues.map(function (it) {
+        return '<div class="issue ' + it.level[0] + '"><div class="lv"></div><div style="flex:1">' +
+          '<div class="t">' + esc(it.cat) + ' · <span class="en" style="font-weight:600">“' + esc(it.hit) + '”</span></div>' +
+          '<div class="d">' + esc(it.msg) + '</div>' +
+          '<div class="f">→ 修改建议：' + esc(it.fix) + '</div>' +
+          '<div class="muted" style="margin-top:4px">所在句：<span class="en">' + esc(it.sent) + '</span></div>' +
+          '</div></div>';
+      }).join('') : '<div class="empty">未检测到明显的意义模糊表达。继续保持精确表意。</div>';
+
+      out = '<div class="card fadein mt2">' +
+        '<div class="h"><h3>批改报告</h3><span class="sp"></span>' +
+        '<span class="pill ' + (r.score >= 80 ? 'g' : r.score >= 60 ? 'a' : 'r') + '">意义明确度 ' + r.score + '/100</span></div>' +
+        '<div class="grid g2" style="align-items:start">' +
+        '<div><div class="muted" style="font-weight:700;margin-bottom:9px">五维意义评分</div>' + rows +
+        '<div class="explain mt" style="background:rgba(99,91,255,.05);border-color:rgba(99,91,255,.16)">' +
+        '<b>诊断：</b>' + esc(r.verdict) + '</div>' +
+        '<div class="row" style="margin-top:10px">' + r.stats.map(function (s) {
+          return '<span class="pill">' + s + '</span>';
+        }).join('') + '</div></div>' +
+        '<div class="radar">' + radar([r.d.vocab, r.d.gram, r.d.struct, r.d.amb, r.d.clarity], RADAR_LABELS, 268) + '</div>' +
+        '</div>' +
+        '<div class="divider"></div>' +
+        '<div class="muted" style="font-weight:700;margin-bottom:10px">逐句划线批注（悬停查看问题）</div>' +
+        '<div class="marked">' + r.marked + '</div>' +
+        '<div class="divider"></div>' +
+        '<div class="muted" style="font-weight:700;margin-bottom:10px">问题清单（' + r.issues.length + ' 项）</div>' +
+        issues +
+        '<div class="divider"></div>' +
+        '<div class="muted" style="font-weight:700;margin-bottom:8px">一键精简 · 自动替换冗余表达后的版本</div>' +
+        '<div class="sentence en" style="border-left-color:var(--green)">' + esc(r.polished) + '</div>' +
+        '</div>';
+    }
+    return '<div class="card">' +
+      '<div class="h"><h3>写作意义批改</h3><span class="sp"></span><span class="muted">逐句检测意义明确性 · 从四个维度划线批注</span></div>' +
+      '<textarea class="editor" id="wta" placeholder="Paste your English paragraph here...&#10;&#10;示例：I think this is a very good thing. With the development of technology, more and more people use AI in order to do their work. It is very important for us."></textarea>' +
+      '<div class="row mt"><button class="btn" data-act="grade">开始批改</button>' +
+      '<button class="btn gh sm" data-act="demo">载入示例</button>' +
+      '<span class="muted">累计批改 ' + (S.done.write || 0) + ' 次</span></div>' +
+      '</div>' + out;
+  }
+
+  function splitSents(text) {
+    // 兼容旧 Safari：不使用 lookbehind
+    var t = String(text), out = [], start = 0;
+    for (var i = 0; i < t.length; i++) {
+      var c = t.charAt(i);
+      var isEnd = (c === '\n') || ('.!?'.indexOf(c) >= 0 && (i + 1 >= t.length || /[\s\n]/.test(t.charAt(i + 1))));
+      if (isEnd) {
+        var seg = t.slice(start, i + 1).replace(/\n/g, ' ').trim();
+        if (seg) out.push(seg);
+        start = i + 1;
+      }
+    }
+    var last = t.slice(start).replace(/\n/g, ' ').trim();
+    if (last) out.push(last);
+    return out;
+  }
+  function gradeText(text) {
+    var sents = splitSents(text);
+    var words = countWords(text);
+    var issues = [], marked = [];
+    sents.forEach(function (sen) {
+      var flags = new Array(sen.length).fill(null);
+      DB.writeRules.forEach(function (rule) {
+        var re;
+        try { re = new RegExp(rule.re, 'gi'); } catch (e) { return; }
+        var m, guard = 0;
+        while ((m = re.exec(sen)) !== null && guard++ < 40) {
+          if (m[0].length === 0) { re.lastIndex++; continue; }
+          var isSentStart = (m.index === 0);
+          if (rule.id === 'vague-subject' && !isSentStart) continue;
+          var ok = true;
+          for (var i = m.index; i < m.index + m[0].length; i++) {
+            if (flags[i] && rank(flags[i]) >= rank(rule.level)) { ok = false; break; }
+          }
+          if (!ok) continue;
+          for (var j = m.index; j < m.index + m[0].length; j++) flags[j] = rule.level;
+          issues.push({ cat: rule.cat, level: rule.level, hit: m[0], msg: rule.msg, fix: rule.fix, sent: sen.length > 96 ? sen.slice(0, 96) + '…' : sen });
+        }
+      });
+      marked.push(renderMarked(sen, flags));
+    });
+    function rank(l) { return l === 'high' ? 3 : l === 'mid' ? 2 : 1; }
+
+    var hi = issues.filter(function (i) { return i.level === 'high'; }).length;
+    var mid = issues.filter(function (i) { return i.level === 'mid'; }).length;
+    var lo = issues.filter(function (i) { return i.level === 'low'; }).length;
+    var wSum = hi * 3 + mid * 2 + lo * 1;
+    var n = Math.max(6, words);
+    var per20 = wSum / (n / 20);
+
+    var vocab = clamp(100 - issues.filter(function (i) { return ['意义模糊', '动词精确', '指代不明'].indexOf(i.cat) >= 0; }).length / (n / 20) * 26, 12, 100);
+    var density = clamp(100 - per20 * 15, 12, 100);
+    var avgLen = sents.length ? words / sents.length : 0;
+    var struct = clamp(100 - Math.abs(avgLen - 16) * 3.2, 20, 100);
+    var logic = clamp(100 - issues.filter(function (i) { return i.cat === '逻辑'; }).length / (n / 20) * 30 - (/(^|\.)\s*(And|But|So)\b/.test(text) ? 4 : 0), 15, 100);
+    var clarity = clamp(100 - per20 * 19, 10, 100);
+    var gram = clamp(100 - issues.filter(function (i) { return i.cat === '冗余' || i.cat === '责任不明'; }).length / (n / 20) * 22, 20, 100);
+
+    var score = Math.round((vocab + density + struct + logic + clarity) / 5);
+    var verdict;
+    if (score >= 85) verdict = '表意清晰、信息密度高。继续保持：每个词都承担不可替代的意义。';
+    else if (score >= 70) verdict = '整体可读，但仍有若干表达依赖笼统词与模糊限制语。优先替换「thing / very / I think」类占位表达。';
+    else if (score >= 55) verdict = '存在明显意义模糊：读者需要猜测你的真实所指。建议先替换模糊名词与笼统评价词，再补充具体数据。';
+    else verdict = '意义密度偏低，大量词语未承担信息。建议重写：每句只保留一个核心命题，用具数名词与精确动词替换占位表达。';
+
+    var polished = text
+      .replace(/\bin order to\b/gi, 'to').replace(/\bso as to\b/gi, 'to').replace(/\bfor the purpose of\b/gi, 'to')
+      .replace(/\bdue to the fact that\b/gi, 'because').replace(/\bin light of the fact that\b/gi, 'because')
+      .replace(/\bfor the reason that\b/gi, 'because').replace(/\bowing to the fact that\b/gi, 'because')
+      .replace(/\bat this point in time\b/gi, 'now').replace(/\bat the present time\b/gi, 'currently')
+      .replace(/\bin the event that\b/gi, 'if')
+      .replace(/\bI think that\b/gi, '').replace(/\bI think\b/gi, '').replace(/\bin my opinion,?\s*/gi, '')
+      .replace(/\bmore and more\b/gi, 'an increasing number of')
+      .replace(/\s+/g, ' ').replace(/\s+([.,;!?])/g, '$1').trim();
+
+    return {
+      score: score, issues: issues, marked: marked.join(' '),
+      d: { vocab: vocab, density: density, struct: struct, logic: logic, clarity: clarity, gram: gram, amb: clamp((density + clarity) / 2, 0, 100) },
+      verdict: verdict, polished: polished,
+      stats: ['共 ' + words + ' 词', sents.length + ' 个句子', '平均句长 ' + avgLen.toFixed(1) + ' 词', '命中 ' + issues.length + ' 处（高 ' + hi + ' / 中 ' + mid + ' / 低 ' + lo + '）']
+    };
+  }
+  function renderMarked(sen, flags) {
+    var out = '', i = 0;
+    while (i < sen.length) {
+      if (!flags[i]) { out += esc(sen[i]); i++; continue; }
+      var lv = flags[i], j = i;
+      while (j < sen.length && flags[j] === lv) j++;
+      out += '<mark class="' + lv[0] + '" title="' + esc(lv === 'high' ? '意义模糊' : lv === 'mid' ? '可更精确' : '提示') + '">' + esc(sen.slice(i, j)) + '</mark>';
+      i = j;
+    }
+    return out;
+  }
+  function doGrade() {
+    var t = $('#wta').value.trim();
+    if (!t) { toast('请先输入需要批改的英文段落'); return; }
+    if (countWords(t) < 4) { toast('文本太短，请输入至少 4 个单词'); return; }
+    lastReport = gradeText(t);
+    bump('write', lastReport.score >= 70);
+    S.mastery.out = clamp(S.mastery.out * 0.6 + lastReport.score * 0.4, 0, 100);
+    S.mastery.vocab = clamp(S.mastery.vocab * 0.85 + lastReport.d.vocab * 0.15, 0, 100);
+    var key = today();
+    var rec = S.history.filter(function (h) { return h.date === key; })[0];
+    if (rec) rec.score = Math.max(rec.score, lastReport.score);
+    else S.history.push({ date: key, score: lastReport.score });
+    if (S.history.length > 120) S.history = S.history.slice(-120);
+    save();
+    render('write');
+    setTimeout(function () { var c = $$('.card'); if (c[1]) c[1].scrollIntoView({ behavior: 'smooth' }); }, 60);
+  }
+
+  /* ========================================================
+     视图：错题本 / 报告
+     ======================================================== */
+  function vWrong() {
+    if (!S.wrong.length) return '<div class="card"><div class="empty">错题本是空的。答错的题目会自动进入这里，并按「间隔重复」提醒你复习。</div></div>';
+    var rows = S.wrong.map(function (w, i) {
+      var d = new Date(w.time);
+      return '<div class="card" style="box-shadow:none;background:rgba(255,255,255,.62);padding:15px 16px">' +
+        '<div class="row" style="justify-content:space-between"><span class="pill">' + esc(w.type) + '</span>' +
+        '<span class="muted">' + (d.getMonth() + 1) + '/' + d.getDate() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + '</span></div>' +
+        '<div style="font-weight:700;margin-top:8px" class="en">' + esc(w.title) + '</div>' +
+        (w.q ? '<div class="muted" style="margin-top:3px">' + esc(w.q) + '</div>' : '') +
+        '<div class="explain good" style="margin-top:9px"><b>正确答案：</b>' + esc(w.ans) + '<div style="margin-top:5px">' + esc(w.why) + '</div></div>' +
+        '<div class="row mt" style="justify-content:flex-end"><button class="btn gh sm" data-act="wrm" data-i="' + i + '">已掌握，移除</button></div>' +
+        '</div>';
+    }).join('');
+    return '<div class="card"><div class="h"><h3>错题本</h3><span class="sp"></span><span class="pill r">' + S.wrong.length + ' 条待复习</span>' +
+      '<button class="btn gh sm" data-act="wclear">清空</button></div>' +
+      '<div class="muted" style="margin-bottom:12px">复习原则：间隔重复 —— 答错会立即回到记忆盒 1，答对则逐步延长复习间隔。</div>' +
+      '<div class="grid" style="gap:11px">' + rows + '</div></div>';
+  }
+  function vReport() {
+    var m = RADAR_KEYS.map(function (k) { return S.mastery[k] || 0; });
+    var total = sumDone();
+    var acc = (function () {
+      var r = 0, t = 0;
+      ['vocab', 'syn', 'poly', 'gram', 'corpus'].forEach(function (k) { r += S.right[k] || 0; t += S.done[k] || 0; });
+      return t ? Math.round(r / t * 100) : 0;
+    })();
+    var words = Object.keys(S.words).sort(function (a, b) { return (S.words[b].box - S.words[a].box) || (S.words[b].right - S.words[a].right); });
+    var wrow = words.length ? words.slice(0, 24).map(function (w) {
+      var r = S.words[w];
+      return '<span class="chip" style="cursor:default" title="记忆盒 ' + (r.box + 1) + ' · 答对 ' + r.right + '/' + r.seen + '">' + esc(w) + ' <b style="color:#635bff">' + '●'.repeat(clamp(r.box + 1, 1, 6)) + '</b></span>';
+    }).join('') : '<span class="muted">还没有学习记录</span>';
+    var hist = S.history.slice(-10).map(function (h) { return '<div class="kv"><div class="k">' + esc(h.date) + '</div><div class="v"><b>' + esc(h.score) + '</b> / 100 表意明确度</div></div>'; }).join('');
+
+    var d0 = pathDay(), lv0 = curLevel(), LVS = LEVELS(CUR());
+    var pbars = [1, 2, 3].map(function (i) {
+      var Lv = LVS[i], dn = Lv.words.filter(function (w) { return S.words[w]; }).length;
+      var pc = Math.round(dn / Lv.words.length * 100);
+      var col = i < lv0 ? 'linear-gradient(90deg,#16a34a,#4ade80)' : (i === lv0 ? 'linear-gradient(90deg,#635bff,#00d4ff)' : 'rgba(10,37,64,.12)');
+      return '<div style="margin-bottom:11px"><div class="row" style="justify-content:space-between;font-size:12.8px;font-weight:650">' +
+        '<span>阶段 ' + i + ' · ' + esc(Lv.name) + ' <span class="muted" style="font-weight:500">' + esc(Lv.days) + '</span></span>' +
+        '<span style="color:' + (i === lv0 ? '#635bff' : '#8792a2') + '">' + dn + '/' + Lv.words.length + '</span></div>' +
+        '<div class="bar" style="margin-top:4px"><i style="width:' + pc + '%;background:' + col + '"></i></div></div>';
+    }).join('');
+
+    return '<div class="card"><div class="h"><h3>学习路径</h3><span class="sp"></span>' +
+      '<span class="pill">第 ' + d0 + ' 天</span>' +
+      '<span class="pill c">当前阶段 ' + lv0 + '/3 · ' + esc(LVS[lv0].name) + '</span></div>' +
+      pbars +
+      '<div class="muted">每 7 天自动进入下一阶段，难度递增；已学过的词由记忆盒自动安排复习，不会丢失。</div></div>' +
+
+      '<div class="grid g4 mt2">' +
+      '<div class="stat brand"><div class="n">' + total + '</div><div class="l">累计练习次数</div></div>' +
+      '<div class="stat green"><div class="n">' + acc + '%</div><div class="l">总正确率</div></div>' +
+      '<div class="stat cyan"><div class="n">' + words.length + '</div><div class="l">词条覆盖</div><div class="d" style="color:#0369a1">词库 ' + DB.words.length + ' 词 · 精讲 ' + (DB.tierCount ? DB.tierCount.core : 0) + ' / 覆盖 ' + (DB.tierCount ? DB.tierCount.syllabus : 0) + '</div></div>' +
+      '<div class="stat amber"><div class="n">' + S.wrong.length + '</div><div class="l">待复习错题</div></div>' +
+      '</div>' +
+      '<div class="grid g2 mt2" style="align-items:start">' +
+      '<div class="card"><div class="h"><h3>能力雷达</h3><span class="sp"></span><span class="muted">五维意义能力</span></div>' +
+      '<div class="radar">' + radar(m, RADAR_LABELS, 300) + '</div>' +
+      '<div class="divider"></div>' +
+      RADAR_LABELS.map(function (l, i) {
+        return '<div class="kv"><div class="k">' + l + '</div><div class="v"><div class="bar" style="margin-top:5px"><i style="width:' + m[i] + '%"></i></div></div></div>';
+      }).join('') +
+      '<div class="row mt2"><button class="btn gh sm" data-act="export">导出学习数据</button>' +
+      '<button class="btn gh sm" data-act="reset" style="color:#b91c1c">重置全部数据</button></div>' +
+      '</div>' +
+      '<div><div class="card"><div class="h"><h3>词条掌握度</h3><span class="sp"></span><span class="muted">● 越多表示记忆越牢</span></div>' +
+      '<div class="row" style="gap:6px">' + wrow + '</div></div>' +
+      '<div class="card"><div class="h"><h3>写作意义明确度记录</h3></div>' +
+      (hist || '<div class="empty">还没有批改记录，去「输出检验」试试。</div>') + '</div></div>' +
+      '</div>';
+  }
+
+  /* ========================================================
+     路由与事件
+     ======================================================== */
+  var TITLES = {
+    today: ['今日学习', '感知—理解—练习—输出—反馈 闭环'],
+    vocab: ['词汇意义解码', '每个词在语境中获得唯一且清晰的意义'],
+    grammar: ['语法意义地图', '每个语法结构贡献清晰可辨的意义'],
+    sentence: ['句子意义分析', '成分标注 · 歧义检测 · 长难句穿透'],
+    corpus: ['真实语料挑战', '在真实语言使用中检验意义理解'],
+    write: ['输出检验批改', '学习的最终检验是能否精确表意'],
+    wrong: ['错题本', '间隔重复 · 直到精确掌握'],
+    report: ['学习报告', '意义明确度量化 · 可视化成长轨迹']
+  };
+
+  /* ========================================================
+     学生登录（本地档案切换）
+     ======================================================== */
+  function gateMeta(id) {
+    try { return JSON.parse(localStorage.getItem(metaKey(id)) || 'null'); } catch (e) { return null; }
+  }
+  function fmtDay(s) {
+    if (!s || s.length < 10) return '';
+    return s.slice(5, 7) + '/' + s.slice(8, 10);
+  }
+  function gateRows() {
+    var rows = USERS.list.map(function (u) {
+      var m = gateMeta(u.id);
+      var stat = '';
+      if (m && m.day) stat = '上次学习 ' + fmtDay(m.day) + ' · ';
+      stat += m ? ('已学 ' + (m.n || 0) + ' 词') : '新同学，开始你的学习';
+      return '<div class="urow fadein">' +
+        '<button class="uenter" data-act="glogin" data-k="' + esc(u.id) + '" type="button">' +
+        '<span class="av">' + esc(u.name.charAt(0)) + '</span>' +
+        '<span style="flex:1;min-width:0"><b>' + esc(u.name) + '</b><small>' + esc(stat) + '</small></span>' +
+        '<span class="go2">继续 →</span></button>' +
+        (USERS.list.length > 1 ? '<button class="udel" data-act="gdel" data-k="' + esc(u.id) + '" title="删除 ' + esc(u.name) + ' 的全部记录" type="button">×</button>' : '') +
+        '</div>';
+    }).join('');
+    return rows || '<div class="muted center" style="padding:10px 0 16px">还没有学生档案，下面输入名字创建第一个 👇</div>';
+  }
+  function showGate(opts) {
+    var o = opts || {};
+    var g = document.getElementById('gate');
+    if (!g) return;
+    var hasCur = !!(USERS.cur && curUser());
+    var isSwitch = !!(hasCur && !o.first);
+    g.innerHTML =
+      '<div class="gcard fadein">' +
+      '<div class="ghead">' +
+      '<div class="logo2">意</div>' +
+      '<div style="min-width:0"><h2>' + (isSwitch ? '切换学生' : '谁在学英语？') + '</h2>' +
+      '<small>' + (isSwitch ? '当前进度已自动保存，选择其他学生可继续各自的学习' : '输入学生名字即可开始 · 进度只保存在本机浏览器，无需密码') + '</small></div>' +
+      (isSwitch ? '<button class="gx" data-act="gclose" type="button" title="返回">✕</button>' : '') +
+      '</div>' +
+      '<div class="ulist">' + gateRows() + '</div>' +
+      '<div class="gnew">' +
+      '<input id="gin" maxlength="14" autocomplete="off" enterkeyhint="go" placeholder="输入名字，如：小美 / Mike">' +
+      '<button class="btn brand" data-act="gcreate" type="button">开始学习</button></div>' +
+      '<div class="muted" style="font-size:11.5px;margin-top:12px;line-height:1.6">同一台设备可创建多个学生，各自独立进度。随时点右上角「● 学生名」切换。</div>' +
+      '</div>';
+    g.classList.remove('hide');
+    if (!isSwitch) setTimeout(function () { var i = document.getElementById('gin'); if (i && i.focus) i.focus(); }, 80);
+  }
+  function hideGate() { var g = document.getElementById('gate'); if (g) g.classList.add('hide'); }
+  function enterUser(id) {
+    if (!USERS.list.some(function (u) { return u.id === id; })) { toast('学生不存在'); return; }
+    S = loadState(id);
+    USERS.cur = id; saveUsers();
+    rollDay();                     // 登录后校准当天：跨天登录同样计入连续天数
+    save();
+    curWord = null; cq = null; lastReport = null;
+    hideGate(); go('today');
+    toast('已登录：' + (S.name || ''));
+  }
+  function doCreate() {
+    var n = validName($('#gin') && $('#gin').value);
+    if (!n) { toast('名字需为 1–14 个字符，仅限中英文、数字、空格与 .-·'); return; }
+    var low = n.toLowerCase();
+    for (var i = 0; i < USERS.list.length; i++) {
+      if (USERS.list[i].name.toLowerCase() === low) { enterUser(USERS.list[i].id); toast('欢迎回来，' + USERS.list[i].name); return; }
+    }
+    var id = 'u' + Date.now().toString(36) + Math.floor(Math.random() * 46656).toString(36);
+    USERS.list.push({ id: id, name: n, ts: Date.now() });
+    USERS.cur = id; saveUsers();
+    S = loadState(id); S.name = n;
+    rollDay();                     // 新档案首次进入即计第 1 天
+    save();
+    hideGate(); go('today');
+    toast('已创建并登录：' + n);
+  }
+  function delUser(id) {
+    var nm = nameOf(id);
+    if (!confirm('确定删除学生「' + nm + '」的全部学习进度与错题？此操作不可恢复。')) return;
+    try { localStorage.removeItem(stateKey(id)); localStorage.removeItem(metaKey(id)); } catch (e) { }
+    USERS.list = USERS.list.filter(function (u) { return u.id !== id; });
+    if (USERS.cur === id) { USERS.cur = null; S = freshState(); S.name = ''; }
+    saveUsers();
+    if (!USERS.cur) { showGate({ first: true }); toast('已删除：' + nm); }
+    else showGate();
+  }
+
+  function render(v) {
+    var wrap = $('#wrap');
+    var html = v === 'today' ? vToday() : v === 'vocab' ? vVocab() : v === 'grammar' ? vGrammar() :
+      v === 'sentence' ? vSentence() : v === 'corpus' ? vCorpus() : v === 'write' ? vWrite() :
+        v === 'wrong' ? vWrong() : vReport();
+    wrap.className = 'wrap fadein';
+    wrap.innerHTML = html;
+    $('#pgTitle').textContent = TITLES[v][0];
+    var nm = (S && S.name) || '';
+    $('#pgSub').textContent = (v === 'today' && nm ? nm + '，继续今天的学习 · ' : '') + TITLES[v][1];
+    $('#streakN').textContent = S.streak;
+    var wn = $('#whoName'); if (wn) wn.textContent = nm || '选择学生';
+    $('#view').scrollTop = 0;
+    $$('#nav a, .tabbar a').forEach(function (a) { a.classList.toggle('on', a.dataset.v === v); });
+    badge();
+    try { location.hash = v; } catch (e) { }
+  }
+  var cur = 'today';
+  function go(v) { cur = v; render(v); }
+
+  document.addEventListener('click', function (e) {
+    var nav = e.target.closest ? e.target.closest('#nav a, .tabbar a') : null;
+    if (nav) { go(nav.dataset.v); return; }
+    var el = e.target.closest ? e.target.closest('[data-act]') : null;
+    if (!el) return;
+    var a = el.dataset.act, k = el.dataset.k, i = parseInt(el.dataset.i, 10);
+
+    switch (a) {
+      case 'goto': {
+        var g = el.dataset.go || '', sp = g.split('|', 3), v0 = sp[0] || k;
+        if (v0 === 'vocab') {
+          if (sp[1] === 'syn') { vocabTab = 'syn'; if (sp[2]) curSyn = DB.syn.filter(function (x) { return x.id === sp[2]; })[0] || curSyn; }
+          else if (sp[1] === 'poly') { vocabTab = 'poly'; if (sp[2]) curPoly = DB.poly.filter(function (x) { return x.w === sp[2]; })[0] || curPoly; }
+          else { vocabTab = 'card'; }
+        } else if (v0 === 'grammar') { if (sp[1]) curGram = sp[1]; }
+        else if (v0 === 'corpus') { if (sp[1]) corpusTab = sp[1]; }
+        go(v0);
+        break;
+      }
+      case 'vtab': vocabTab = k; go('vocab'); break;
+      case 'wans': ansWord(el, i); break;
+      case 'wnext': curWord = null; render('vocab'); break;
+      case 'synpick': curSyn = DB.syn.filter(function (x) { return x.id === k; })[0]; render('vocab'); break;
+      case 'sans': ansSyn(el, i); break;
+      case 'polypick': curPoly = DB.poly.filter(function (x) { return x.w === k; })[0]; render('vocab'); break;
+      case 'pans': ansPoly(el, parseInt(el.dataset.q, 10), i); break;
+      case 'rootpick': curRoot = k; render('vocab'); break;
+      case 'gpick': curGram = k; render('grammar'); break;
+      case 'gans': ansGram(el, i); break;
+      case 'stab': sentTab = k; go('sentence'); break;
+      case 'spick': curSent = parseInt(k, 10); render('sentence'); break;
+      case 'sdone': bump('sent', true); toast('已标记为掌握'); render('sentence'); break;
+      case 'apick': curAmb = parseInt(k, 10); ambDraft = ''; render(sentTab === 'ambig' ? 'sentence' : 'corpus'); break;
+      case 'ambsub':
+        var v = ($('#ambIn') || {}).value || '';
+        if (countWords(v) < 3) { toast('请至少写一个完整的英文句子'); break; }
+        ambDraft = v; bump('amb', true);
+        $('#ambexp').innerHTML = '<div class="explain good"><div class="hd"><span class="pill g">✓ 已提交</span> 你的改写</div>' +
+          '<div class="en" style="margin-top:6px">' + esc(v) + '</div>' +
+          '<div style="margin-top:8px">对照标准改写：<b>意义是否唯一确定？读者能否只得到一种解读？</b>若你的版本仍可被两种理解，请补出省略的主语或把分词改写为从句。</div></div>';
+        break;
+      case 'ambshow':
+        var a2 = DB.ambig[curAmb];
+        $('#ambexp').innerHTML = '<div class="explain"><div class="hd">标准改写（两种明确解读）</div>' +
+          a2.readings.map(function (r) { return '<div style="margin-top:7px"><b>' + esc(r.m) + '</b><br><span class="en">' + esc(r.rw) + '</span><br><span class="muted">' + esc(r.note) + '</span></div>'; }).join('') +
+          '</div>'; break;
+      case 'ctab': corpusTab = k; go('corpus'); break;
+      case 'cans': ansChal(el, i); break;
+      case 'cnext': cqi++; render('corpus'); break;
+      case 'cnew': newChallenge(); render('corpus'); break;
+      case 'grade': doGrade(); break;
+      case 'demo':
+        $('#wta').value = 'I think artificial intelligence is a very good thing. With the development of technology, more and more people use AI in order to do their work. It is very important for us because it can help people get things done. Some people say it is bad, but I do not think so.';
+        toast('已载入示例文本'); break;
+      case 'wrm': S.wrong.splice(i, 1); save(); render('wrong'); break;
+      case 'wclear':
+        if (confirm('确定清空全部 ' + S.wrong.length + ' 条错题记录？')) { S.wrong = []; save(); render('wrong'); }
+        break;
+      case 'export':
+        var blob = new Blob([JSON.stringify(S, null, 2)], { type: 'application/json' });
+        var url = URL.createObjectURL(blob), a3 = document.createElement('a');
+        a3.href = url; a3.download = 'lexisense' + ((S && S.name) ? '-' + S.name : '') + '-' + today() + '.json'; a3.click();
+        setTimeout(function () { URL.revokeObjectURL(url); }, 800);
+        toast('学习数据已导出'); break;
+      case 'setseg': {
+        var segObj = (window.DBX && DBX.SEGS || []).filter(function (s) { return s.k === k; })[0];
+        if (segObj) { var firstG = (DB.segGrades[segObj.k] || [])[0]; if (firstG) { S.grade = firstG.k; S.start = ''; save(); render('today'); } }
+        break;
+      }
+      case 'setgrade': {
+        if (DB.gradeMap && DB.gradeMap[k]) { S.grade = k; S.start = ''; save(); render('today'); }
+        break;
+      }
+      case 'scope': {
+        if (k === 'grade' || k === 'all') { S.scope = k; save(); render(cur); }
+        break;
+      }
+      case 'who': showGate(); break;
+      case 'glogin': enterUser(k); break;
+      case 'gcreate': doCreate(); break;
+      case 'gclose': hideGate(); break;
+      case 'gdel': delUser(k); break;
+      case 'reset':
+        if (USERS.cur) {
+          if (confirm('将清空「' + nameOf(USERS.cur) + '」的全部学习进度、错题与报告（学生档案保留），确定继续？')) {
+            S = freshState(); S.name = nameOf(USERS.cur); save();
+            curWord = null; cq = null; lastReport = null; go('today');
+          }
+        }
+        break;
+    }
+  });
+
+  document.addEventListener('keydown', function (e) {
+    var tg = e.target;
+    if (tg && tg.id === 'gin' && e.key === 'Enter') { e.preventDefault(); doCreate(); return; }
+    if (tg && (tg.tagName === 'TEXTAREA' || tg.tagName === 'INPUT')) return;
+    if (e.key === 'Escape') { hideGate(); return; }
+    var map = { '1': 'today', '2': 'vocab', '3': 'grammar', '4': 'sentence', '5': 'corpus', '6': 'write', '7': 'wrong', '8': 'report' };
+    if (map[e.key]) go(map[e.key]);
+    if (e.key === 'Enter' && cur === 'vocab' && vocabTab === 'card' && curWord && curWord._done) { curWord = null; render('vocab'); }
+  });
+
+  var h = (location.hash || '').replace('#', '');
+  if (TITLES[h]) cur = h;
+  go(cur);
+  /* 无当前学生档案（未登录）→ 显示登录层；已有则直接继续各自进度 */
+  if (!USERS.cur || !curUser()) showGate({ first: true });
+})();

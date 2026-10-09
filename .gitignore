@@ -1,0 +1,13 @@
+# ── 本地数据与内部记忆（含敏感信息，绝不入库）──
+.workbuddy/
+__pycache__/
+*.pyc
+
+# ── 历史产物（旧版本 APK，仅保留 release 下当前版本）──
+release/_archive/
+
+# ── 系统/编辑器临时文件 ──
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp

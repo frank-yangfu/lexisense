@@ -6,8 +6,9 @@
 纯前端 · 无后端 · 无 CDN · 无外链 —— 双击 `index.html` 即可离线使用。
 
 - 🌐 **在线使用**：https://frank-yangfu.github.io/lexisense/
-- 📱 **安卓安装包**：[`release/lexisense-1.4.apk`](release/lexisense-1.4.apk)（3.3 MB · 已签名 · Android 5.1+）
-- 📄 **单文件离线版**：[`lexisense-offline.html`](lexisense-offline.html)（1.2 MB，一个文件发给手机就能用）
+- 📦 **下载（最新版）**：[Releases · v1.4](https://github.com/frank-yangfu/lexisense/releases/latest)
+  - 📱 `lexisense-1.4.apk` — 安卓安装包（3.3 MB · 已签名 · Android 5.1+）
+  - 📄 `lexisense-offline.html` — 单文件离线版（1.2 MB，一个文件发给手机就能用）
 
 ---
 
